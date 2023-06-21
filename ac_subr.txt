@@ -1,0 +1,3086 @@
+############################################################
+# Ancient Cave floor generation routines
+# documented by Moppleton
+# umokumok@gmail.com
+# This version is maybe 60-70% complete.
+############################################################
+# relevant memory addresses for code below:
+##### RAM:
+# 7E0024: width of current room in room generation function
+# 7E0025: height of current room in room generation function
+# 7E0026: current x position in room generation function; derived from 7E005A and rng
+# 7E0027: current y position in room generation function; derived from 7E005B and rng
+# 7E0040: frame counter used as part of RNG for floor generation
+# 7E0054: copy of 7E0040 frame counter used to loop through RNG values at the start of the floor generation
+#         later, this is some sort of palette index thing that 7E069F is loaded with
+#         still later, this is floor number * 1000, for item inclusion logic
+#         even later, room number (also $56?)
+# 7E0056: [16bit] index of music for current floor
+#         later, room number (also $54?)
+# 7E0058: [16bit] appears to be floor num & 0x06, used for some calculations of which palette to load
+#         also, used as a copy of 7E0024 in some spots
+# 7E0059: used as a copy of 7E0025 in some spots
+# 7E005A: x position for generating 7FEA00 rooms (init to ~1); this + an rng factor goes into 7E0026
+# 7E005B: y position for generating 7FEA00 rooms (init to ~4); this + an rng factor goes into 7E0027
+# 7E0063: height of previously generated room?
+# 7E008F: used as a copy of 7E0026 in some spots
+# 7E0091: used as a copy of 7E0027 in some spots
+#
+# 7E0521 - 7E0558: RNG values iterated through and modified occasionally for pseudo-randomness
+# 7E0559: index of "current" RNG value
+#
+# 7E099D: [16bit] index of music currently playing
+#
+# 00211B: [8bit] multiply value 1 (16 bit and written to twice)
+# 00211C: [8bit] multiply value 2
+# 002134: [24bit] multiply result
+#
+# 7E4000 - 7E5xxx: decompression target block for room data
+#
+# 7F0000 - 7F0009: 10 bytes, some sort of header data for layer 1? from 839F3F = 0x19F3F
+# 7F000A - 7F3F09: map data for floor, layer 1 [3F00 bytes]
+# 7F3F0A - 7F3F0D: 4 bytes, some sort of header data for layer 2? from 839F45 = 0x19F45
+# 7F3F0E - 7F7E0D: map data for floor, layer 2 [3F00 bytes]
+#
+# 7FD028: x and y of maxim?  this is written at $83/8DBF, which is not part of this
+#
+# 7FE696: floor number
+# 7FE697: floor number / 10 for tileset/music stuff
+# 7FE699: [16bit] tileset value #3 for floor - exact purpose currently unknown
+# 7FE69B: [16bit] tileset value #1 for floor - exact purpose currently unknown
+# 7FE69D: [16bit] tileset value #2 for floor - exact purpose currently unknown
+# 7FE69F: [24bit] palette value #2 for floor - exact purpose currently unknown
+# 7FE6A2: [16bit] palette value #1 for floor - exact purpose currently unknown
+# 7FE746 - 7FE755: [16bit] 8 IDs of items for chests for this floor
+# 7FEA00 - 7EFAFF: 2D array of assembly of room numbers on the floor map [8x15, each value representing 6x6 tiles]
+# 7FEB00 - 7EFBFF: 2D array of assembly of room data on the floor map    [8x15, each value representing 6x6 tiles max]
+#                  these are indexes into the 6x6 blocks in 93/D69B [0x9d69b], which in turn reference the data 
+#                  decompressed to 7E4000 in the below functions.  0x1C is an empty block.
+##### ROM:
+# 96CF69 - 96FABD: [0xB4F69 - 0xB7ABD] 16-bit offsets followed by data for all 0x1D2 items
+############################################################
+
+
+
+
+#####################################
+########### main subroutine call:
+#####################################
+######## call [GENERATE_FLOOR]
+$83/B26D 22 31 9E 83 JSL $839E31[$83:9E31]   
+# there might be more to see below here; ie maxim x/y setting, enemy placement
+
+
+
+#####################################
+########### $839E31 [GENERATE_FLOOR]:
+#####################################
+
+************* initialize
+# floor number
+$83/9E31 AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/9E35 CF 75 0B 00 CMP $000B75[$00:0B75]   
+$83/9E39 90 04       BCC $04    [$9E3F]      
+$83/9E3B 8F 75 0B 00 STA $000B75[$00:0B75]   
+$83/9E3F AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/9E43 3A          DEC A                   
+$83/9E44 8F 04 42 00 STA $004204[$00:4204]   
+$83/9E48 7B          TDC                     
+$83/9E49 8F 05 42 00 STA $004205[$00:4205]   
+$83/9E4D A9 0A       LDA #$0A                
+# divide floor number by 10 .. this is used later by music/tileset stuff
+$83/9E4F 8F 06 42 00 STA $004206[$00:4206]   
+$83/9E53 A9 FF       LDA #$FF                
+$83/9E55 8F F1 E6 7F STA $7FE6F1[$7F:E6F1]   
+$83/9E59 7B          TDC                     
+$83/9E5A 8F 31 E7 7F STA $7FE731[$7F:E731]   
+$83/9E5E 8F 32 E7 7F STA $7FE732[$7F:E732]   
+$83/9E62 8F 34 E7 7F STA $7FE734[$7F:E734]   
+$83/9E66 8F 35 E7 7F STA $7FE735[$7F:E735]   
+$83/9E6A 8F 33 E7 7F STA $7FE733[$7F:E733]   
+# frame counter; this is used to initialize the other RNG stuff by being the loop counter for calling it
+$83/9E6E A5 40       LDA $40    [$00:0040]   
+$83/9E70 29 1F       AND #$1F                
+$83/9E72 1A          INC A                   
+# loop counter for next part
+$83/9E73 85 54       STA $54    [$00:0054]   
+	######## call [GENERATE_RNG]
+	$83/9E75 22 C7 82 80 JSL $8082C7[$80:82C7]
+	# use the frame counter to loop through generating rng values for additional pseudo-rng
+	$83/9E79 C6 54       DEC $54    [$00:0054]
+	$83/9E7B D0 F8       BNE $F8    [$9E75]   
+# Check for floor 99
+$83/9E7D AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/9E81 C9 63       CMP #$63                
+$83/9E83 D0 1D       BNE $1D    [$9EA2]      
+
+************* load tileset/music/etc data
+# Not floor 99, load the floornum / 10 value calculated above
+$83/9EA2 7B          TDC                     
+$83/9EA3 8F 98 E6 7F STA $7FE698[$7F:E698]   
+$83/9EA7 7B          TDC                     
+$83/9EA8 AF 14 42 00 LDA $004214[$00:4214]   
+$83/9EAC AA          TAX                     
+# load and store theme index (0, 1, or 2 from table of ten values)
+# use it to index the stuff below
+$83/9EAD BF 4F 9F 83 LDA $839F4F,x[$83:9F4F] 
+$83/9EB1 8F 97 E6 7F STA $7FE697[$7F:E697]   
+$83/9EB5 0A          ASL A                   
+$83/9EB6 AA          TAX                     
+$83/9EB7 C2 20       REP #$20                
+# load music
+$83/9EB9 BF 65 9F 83 LDA $839F65,x[$83:9F65] 
+$83/9EBD 85 56       STA $56    [$00:0056]   
+# load tileset value 1
+$83/9EBF BF 49 9F 83 LDA $839F49,x[$83:9F49] 
+$83/9EC3 8F 9B E6 7F STA $7FE69B[$7F:E69B]   
+# load tileset value 2
+$83/9EC7 BF 5F 9F 83 LDA $839F5F,x[$83:9F5F] 
+$83/9ECB 8F 9D E6 7F STA $7FE69D[$7F:E69D]   
+# load tileset value 3
+$83/9ECF BF 59 9F 83 LDA $839F59,x[$83:9F59] 
+$83/9ED3 8F 99 E6 7F STA $7FE699[$7F:E699]   
+# load palette value 1
+$83/9ED7 BF 6B 9F 83 LDA $839F6B,x[$83:9F6B] 
+$83/9EDB 8F A2 E6 7F STA $7FE6A2[$7F:E6A2]   
+# load palette value 2, this indexes some other shit below
+$83/9EDF BF 7F 9F 83 LDA $839F7F,x[$83:9F7F] 
+$83/9EE3 85 54       STA $54    [$00:0054]   
+# is this varying the palette by floor?
+$83/9EE5 AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/9EE9 29 06 00    AND #$0006              
+$83/9EEC 85 58       STA $58    [$00:0058]   
+$83/9EEE 4A          LSR A                   
+$83/9EEF 65 58       ADC $58    [$00:0058]   
+$83/9EF1 65 54       ADC $54    [$00:0054]   
+$83/9EF3 AA          TAX                     
+$83/9EF4 BF 7F 9F 83 LDA $839F7F,x[$83:9FA0] 
+$83/9EF8 8F 9F E6 7F STA $7FE69F[$7F:E69F]   
+$83/9EFC BF 80 9F 83 LDA $839F80,x[$83:9FA1] 
+$83/9F00 8F A0 E6 7F STA $7FE6A0[$7F:E6A0]   
+# load the index value again, mul by 3, use it to index into a set of 24bit offsets
+# for .. something.  idk it fucked up collisions and stuff when it was wrong
+$83/9F04 AF 97 E6 7F LDA $7FE697[$7F:E697]   
+$83/9F08 0A          ASL A                   
+$83/9F09 6F 97 E6 7F ADC $7FE697[$7F:E697]   
+$83/9F0D AA          TAX                     
+# ?
+$83/9F0E BF 73 9F 83 LDA $839F73,x[$83:9F73] 
+$83/9F12 8F A5 E6 7F STA $7FE6A5[$7F:E6A5]   
+$83/9F16 E2 20       SEP #$20                
+$83/9F18 BF 75 9F 83 LDA $839F75,x[$83:9F75] 
+$83/9F1C 8F A7 E6 7F STA $7FE6A7[$7F:E6A7]   
+$83/9F20 A5 56       LDA $56    [$00:0056]   
+$83/9F22 CD 9D 09    CMP $099D  [$83:099D]   
+$83/9F25 F0 07       BEQ $07    [$9F2E]      
+######## call [UNKNOWN_1]
+$83/9F2E 22 D3 B5 83 JSL $83B5D3[$83:B5D3]   
+
+************* do most of the processing
+# this 9013 call takes up most of the processing
+######## call [GENERATE_FLOOR_DATA]
+$83/9F32 20 13 90    JSR $9013  [$83:9013]   
+
+************* finalize
+# increment floor number, then we're done
+$83/9F35 AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/9F39 1A          INC A                   
+$83/9F3A 8F 96 E6 7F STA $7FE696[$7F:E696]   
+$83/9F3E 6B          RTL                     
+
+
+
+
+##########################################
+########### $839013 [GENERATE_FLOOR_DATA]:
+##########################################
+
+************* wipe out previous room data
+# clear map data by filling it with 1C, the empty value; also fill the room#s with zero
+# note this 9013 subroutine spans almost the whole rest of the log
+$83/9013 8B          PHB                     
+$83/9014 E2 20       SEP #$20                
+$83/9016 C2 10       REP #$10                
+$83/9018 A9 7E       LDA #$7E                
+$83/901A 48          PHA                     
+$83/901B AB          PLB                     
+$83/901C C2 20       REP #$20                
+$83/901E A2 00 00    LDX #$0000              
+	$83/9021 7B          TDC                     
+	$83/9022 9F 00 EA 7F STA $7FEA00,x[$7F:EA00] 
+	$83/9026 A9 1C 1C    LDA #$1C1C              
+	$83/9029 9F 00 EB 7F STA $7FEB00,x[$7F:EB00] 
+	$83/902D E8          INX                     
+	$83/902E E8          INX                     
+	$83/902F E0 00 01    CPX #$0100              
+	$83/9032 90 ED       BCC $ED    [$9021]      
+# done clearing map data
+
+************* floor 60 and below processing? not sure what this is
+$83/9034 E2 20       SEP #$20                
+$83/9036 A9 96       LDA #$96                
+$83/9038 48          PHA                     
+$83/9039 AB          PLB                     
+$83/903A C2 20       REP #$20                
+$83/903C E2 20       SEP #$20                
+$83/903E A2 00 00    LDX #$0000              
+$83/9041 86 5D       STX $5D    [$00:005D]   
+$83/9043 A2 00 10    LDX #$1000              
+$83/9046 86 60       STX $60    [$00:0060]   
+$83/9048 AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/904C C9 3C       CMP #$3C                
+$83/904E 90 08       BCC $08    [$9058]      
+
+************* multiply floor number by 1000 (3E8) for value threshold
+$83/9058 A9 E8       LDA #$E8                
+$83/905A 8D 1B 21    STA $211B  [$96:211B]   
+$83/905D A9 03       LDA #$03                
+$83/905F 8D 1B 21    STA $211B  [$96:211B]   
+$83/9062 AF 96 E6 7F LDA $7FE696[$7F:E696]   
+$83/9066 1A          INC A                   
+$83/9067 8D 1C 21    STA $211C  [$96:211C]   
+$83/906A AD 34 21    LDA $2134  [$96:2134]   
+$83/906D 85 54       STA $54    [$00:0054]   
+$83/906F AD 35 21    LDA $2135  [$96:2135]   
+$83/9072 85 55       STA $55    [$00:0055]   
+
+************* process items for inclusion in a big loop through 3A4
+$83/9074 A0 00 00    LDY #$0000                -- this goes through 0x3A4 something, 2 at a time
+	$83/9077 C2 20       REP #$20                
+	$83/9079 B9 69 CF    LDA $CF69,y[$96:CF69]   
+	$83/907C AA          TAX                     
+	$83/907D E2 20       SEP #$20                
+	$83/907F BD 69 CF    LDA $CF69,x[$96:D30F]   
+	$83/9082 89 02       BIT #$02                
+	$83/9084 F0 36       BEQ $36    [$90BC]      
+	$83/9086 89 20       BIT #$20                
+	$83/9088 D0 32       BNE $32    [$90BC]      
+	$83/908A BD 6A CF    LDA $CF6A,x[$96:D8AD]   
+	$83/908D 89 20       BIT #$20                
+	$83/908F D0 2B       BNE $2B    [$90BC]      
+	$83/9091 C2 20       REP #$20                
+	$83/9093 BD 6E CF    LDA $CF6E,x[$96:D8B1]   
+	$83/9096 C5 54       CMP $54    [$00:0054]   
+	$83/9098 B0 22       BCS $22    [$90BC]      
+	$83/909A BD 70 CF    LDA $CF70,x[$96:D8B3]   
+	$83/909D 89 01 00    BIT #$0001              
+	$83/90A0 D0 0E       BNE $0E    [$90B0]      
+
+	$83/90B0 A6 5D       LDX $5D    [$00:005D]   
+	$83/90B2 98          TYA                     
+	$83/90B3 4A          LSR A                   
+	$83/90B4 9F 00 00 7F STA $7F0000,x[$7F:0000] 
+	$83/90B8 E8          INX                     
+	$83/90B9 E8          INX                     
+	$83/90BA 86 5D       STX $5D    [$00:005D]   
+
+	$83/90BC E2 20       SEP #$20                
+	$83/90BE C8          INY                     
+	$83/90BF C8          INY                     
+	$83/90C0 C0 A4 03    CPY #$03A4              
+	$83/90C3 90 B2       BCC $B2    [$9077]      
+# done processing items 
+
+************* place iris gear?
+$83/90C5 A9 7F       LDA #$7F                
+$83/90C7 48          PHA                     
+$83/90C8 AB          PLB                     
+$83/90C9 A0 00 00    LDY #$0000              
+$83/90CC 7B          TDC                     
+$83/90CD 8D 5D E7    STA $E75D  [$7F:E75D]   
+######## call [GENERATE_RNG]
+$83/90D0 22 C7 82 80 JSL $8082C7[$80:82C7]   
+# this seems to be the chance of getting iris gear
+$83/90D4 C9 05       CMP #$05                
+$83/90D6 B0 3E       BCS $3E    [$9116]      
+$83/90D8 A9 09       LDA #$09                
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/90DA 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/90DD 85 58       STA $58    [$00:0058]   
+######## call [UNKNOWN_40]
+$83/90DF 22 98 E8 80 JSL $80E898[$80:E898]   
+$83/90E3 BF 5E E7 7F LDA $7FE75E,x[$7F:E75E] 
+$83/90E7 24 55       BIT $55    [$00:0055]   
+$83/90E9 D0 2B       BNE $2B    [$9116]      
+$83/90EB 05 55       ORA $55    [$00:0055]   
+$83/90ED 9F 5E E7 7F STA $7FE75E,x[$7F:E75E] 
+$83/90F1 A5 58       LDA $58    [$00:0058]   
+$83/90F3 18          CLC                     
+$83/90F4 69 C8       ADC #$C8                
+$83/90F6 22 1A BE 80 JSL $80BE1A[$80:BE1A]   
+$83/90FA D0 1A       BNE $1A    [$9116]      
+$83/90FC 7B          TDC                     
+$83/90FD A5 58       LDA $58    [$00:0058]   
+$83/90FF C2 20       REP #$20                
+$83/9101 0A          ASL A                   
+$83/9102 AA          TAX                     
+$83/9103 BF CA FF 91 LDA $91FFCA,x[$91:FFD8] 
+$83/9107 09 00 02    ORA #$0200              
+$83/910A 8D 46 E7    STA $E746  [$7F:E746]   
+$83/910D E2 20       SEP #$20                
+$83/910F A9 80       LDA #$80                
+$83/9111 8D 5D E7    STA $E75D  [$7F:E75D]   
+$83/9114 80 2A       BRA $2A    [$9140]      
+$83/9140 C8          INY                     
+
+$83/9116 AF 5B E7 7F LDA $7FE75B[$7F:E75B]   
+$83/911A 30 26       BMI $26    [$9142]      
+$83/911C 7B          TDC                     
+$83/911D 8F 5B E7 7F STA $7FE75B[$7F:E75B]   
+$83/9121 AF 96 E6 7F LDA $7FE696[$7F:E696]   
+# what is this?  why is > x15 different?
+$83/9125 C9 15       CMP #$15                
+$83/9127 90 19       BCC $19    [$9142]      
+
+
+************* pick what will be in chests for this floor
+######## call [GENERATE_RNG]
+	$83/9142 22 C7 82 80 JSL $8082C7[$80:82C7]   
+	# decide the chest types
+	$83/9146 C9 AE       CMP #$AE                
+	$83/9148 B0 25       BCS $25    [$916F]
+	$83/914A C9 81       CMP #$81                
+	$83/914C B0 28       BCS $28    [$9176]      
+	$83/914E C9 63       CMP #$63                
+	$83/9150 B0 40       BCS $40    [$9192]      
+	$83/9152 C9 5E       CMP #$5E                
+	$83/9154 B0 72       BCS $72    [$91C8]      
+	$83/9156 C9 24       CMP #$24                
+	$83/9158 B0 53       BCS $53    [$91AD]      
+	# non restorative consumables
+	$83/915A A9 1F       LDA #$1F                
+	######## call [RANDOM_16BIT_OFFSET_X]
+	$83/915C 20 11 9E    JSR $9E11  [$83:9E11]   
+	$83/915F BF 3D F1 94 LDA $94F13D,x[$94:F15B] 
+	$83/9163 99 46 E7    STA $E746,y[$7F:E74A]   
+	$83/9166 BF 3E F1 94 LDA $94F13E,x[$94:F15C] 
+	$83/916A 99 47 E7    STA $E747,y[$7F:E74B]   
+	$83/916D 80 6E       BRA $6E    [$91DD]      
+	# weapons
+	$83/916F A2 00 00    LDX #$0000              
+	$83/9172 A5 5D       LDA $5D    [$00:005D]   
+	$83/9174 80 05       BRA $05    [$917B]      
+	# armor
+	$83/9176 A2 00 10    LDX #$1000              
+	$83/9179 A5 60       LDA $60    [$00:0060]   
+	$83/917B 86 54       STX $54    [$00:0054]   
+	$83/917D 4A          LSR A                   
+	######## call [RANDOM_16BIT_OFFSET_X]
+	$83/917E 20 11 9E    JSR $9E11  [$83:9E11]   
+	$83/9181 C2 20       REP #$20                
+	$83/9183 8A          TXA                     
+	$83/9184 18          CLC                     
+	$83/9185 65 54       ADC $54    [$00:0054]   
+	$83/9187 AA          TAX                     
+	$83/9188 BD 00 00    LDA $0000,x[$7F:000A]   
+	$83/918B 99 46 E7    STA $E746,y[$7F:E746]   
+	$83/918E E2 20       SEP #$20                
+	$83/9190 80 4B       BRA $4B    [$91DD]      
+	# spells
+	$83/9192 A9 23       LDA #$23                
+	######## call [MULTIPLY_TIMES_RANDOM]
+	$83/9194 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+	$83/9197 85 55       STA $55    [$00:0055]   
+	$83/9199 5A          PHY                     
+	######## call [UNKNOWN_39]
+	$83/919A 22 52 C6 83 JSL $83C652[$83:C652]   
+	$83/919E 7A          PLY                     
+	$83/919F B0 0C       BCS $0C    [$91AD]      
+	$83/91A1 A5 55       LDA $55    [$00:0055]   
+	$83/91A3 99 46 E7    STA $E746,y[$7F:E748]   
+	$83/91A6 A9 80       LDA #$80                
+	$83/91A8 99 47 E7    STA $E747,y[$7F:E749]   
+	$83/91AB 80 30       BRA $30    [$91DD]      
+	# restorative consumables
+	$83/91AD A9 09       LDA #$09                
+	######## call [MULTIPLY_TIMES_RANDOM_TWICE_AVG]
+	$83/91AF 20 E4 9D    JSR $9DE4  [$83:9DE4]   
+	$83/91B2 EB          XBA                     
+	$83/91B3 A9 00       LDA #$00                
+	$83/91B5 EB          XBA                     
+	$83/91B6 0A          ASL A                   
+	$83/91B7 AA          TAX                     
+	$83/91B8 BF DC FF 91 LDA $91FFDC,x[$91:FFE6] 
+	$83/91BC 99 46 E7    STA $E746,y[$7F:E748]   
+	$83/91BF BF DD FF 91 LDA $91FFDD,x[$91:FFE7] 
+	$83/91C3 99 47 E7    STA $E747,y[$7F:E749]   
+	$83/91C6 80 15       BRA $15    [$91DD]      
+	# blue chests
+	$83/91C8 A9 29       LDA #$29                
+	######## call [RANDOM_16BIT_OFFSET_X]
+	$83/91CA 20 11 9E    JSR $9E11  [$83:9E11]   
+	$83/91CD BF A0 EE 94 LDA $94EEA0,x[$94:EEDE] 
+	$83/91D1 99 46 E7    STA $E746,y[$7F:E74C]   
+	$83/91D4 BF A1 EE 94 LDA $94EEA1,x[$94:EEDF] 
+	$83/91D8 09 40       ORA #$40                
+	$83/91DA 99 47 E7    STA $E747,y[$7F:E74D]   
+	$83/91DD C8          INY                     
+	$83/91DE C8          INY                     
+	# generated 8 chest drops yet?
+	$83/91DF C0 10 00    CPY #$0010              
+	$83/91E2 B0 03       BCS $03    [$91E7]      
+	$83/91E4 82 5B FF    BRL $FF5B  [$9142]      
+
+************* generate room data
+$83/91E7 E2 20       SEP #$20                
+$83/91E9 A9 83       LDA #$83                
+$83/91EB 48          PHA                     
+$83/91EC AB          PLB                     
+# x,y near start location of floor generation (x=1, y=4) .. some rng applied to this in a sec here
+$83/91ED A9 01       LDA #$01                
+$83/91EF 85 5A       STA $5A    [$00:005A]   
+$83/91F1 A9 04       LDA #$04                
+$83/91F3 85 5B       STA $5B    [$00:005B]   
+$83/91F5 64 56       STZ $56    [$00:0056]   
+$83/91F7 64 63       STZ $63    [$00:0063]   
+    # loop point
+	$83/91F9 A5 5A       LDA $5A    [$00:005A]   
+	$83/91FB 85 26       STA $26    [$00:0026]   
+	$83/91FD A9 03       LDA #$03                
+	######## call [MULTIPLY_TIMES_RANDOM]
+	$83/91FF 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+	$83/9202 3A          DEC A                   
+	$83/9203 18          CLC                     
+	$83/9204 65 5B       ADC $5B    [$00:005B]   
+	$83/9206 85 27       STA $27    [$00:0027]   
+	# generate a random width?
+	$83/9208 A9 04       LDA #$04                
+	######## call [MULTIPLY_TIMES_RANDOM_TWICE_AVG]
+	$83/920A 20 E4 9D    JSR $9DE4  [$83:9DE4]   
+	$83/920D 1A          INC A                   
+	# store width of room
+	$83/920E 85 24       STA $24    [$00:0024]    
+	$83/9210 18          CLC                     
+	# add to current x position
+	$83/9211 65 26       ADC $26    [$00:0026]   
+	# if this room is trying to extend off the map, skip past CREATE_ROOM
+	$83/9213 C9 09       CMP #$09                
+	$83/9215 B0 30       BCS $30    [$9247]      
+	# generate a random height?
+	$83/9217 A9 04       LDA #$04                
+	######## call [MULTIPLY_TIMES_RANDOM_TWICE_AVG]
+	$83/9219 20 E4 9D    JSR $9DE4  [$83:9DE4]   
+	$83/921C 1A          INC A                   
+	# store height of room
+	$83/921D 85 25       STA $25    [$00:0025]    
+	$83/921F 18          CLC                     
+	# add to current y position
+	$83/9220 65 27       ADC $27    [$00:0027]   
+	# if this room is trying to extend off the map, skip past CREATE_ROOM
+	$83/9222 C9 0F       CMP #$0F                
+	$83/9224 B0 21       BCS $21    [$9247]      
+	$83/9226 A5 25       LDA $25    [$00:0025]   
+	$83/9228 C5 63       CMP $63    [$00:0063]   
+	$83/922A 90 02       BCC $02    [$922E]      
+	$83/922C 85 63       STA $63    [$00:0063]   
+	$83/922E A5 24       LDA $24    [$00:0024]   
+	$83/9230 18          CLC                     
+	$83/9231 65 25       ADC $25    [$00:0025]   
+	$83/9233 C9 03       CMP #$03                
+	$83/9235 B0 02       BCS $02    [$9239]      
+
+	# increment room ID
+	$83/9239 A5 56       LDA $56    [$00:0056]   
+	$83/923B 1A          INC A                   
+	$83/923C 85 56       STA $56    [$00:0056]   
+	$83/923E 85 54       STA $54    [$00:0054]   
+	# at 8th room?  quit out of loop
+	$83/9240 C9 08       CMP #$08                
+	$83/9242 B0 22       BCS $22    [$9266]      
+	######## call [CREATE_ROOM]
+	$83/9244 20 A0 9C    JSR $9CA0  [$83:9CA0]   
+	$83/9247 A5 5A       LDA $5A    [$00:005A]   
+	$83/9249 18          CLC                     
+	$83/924A 65 24       ADC $24    [$00:0024]   
+	$83/924C 85 5A       STA $5A    [$00:005A]   
+	$83/924E C9 09       CMP #$09                
+	$83/9250 90 A7       BCC $A7    [$91F9]      
+	$83/9252 A9 01       LDA #$01                
+	$83/9254 85 5A       STA $5A    [$00:005A]   
+	$83/9256 A9 04       LDA #$04                
+	######## call [MULTIPLY_TIMES_RANDOM_TWICE_AVG]
+	$83/9258 20 E4 9D    JSR $9DE4  [$83:9DE4]   
+	$83/925B 1A          INC A                   
+	$83/925C 1A          INC A                   
+	$83/925D 18          CLC                     
+	$83/925E 65 5B       ADC $5B    [$00:005B]   
+	$83/9260 85 5B       STA $5B    [$00:005B]   
+	$83/9262 C9 0F       CMP #$0F                
+	$83/9264 90 93       BCC $93    [$91F9]      
+
+************* set spawn spot? and maybe some other stuff?
+$83/9266 A9 7F       LDA #$7F                
+$83/9268 48          PHA                     
+$83/9269 AB          PLB                     
+$83/926A A9 08       LDA #$08                
+$83/926C 85 2A       STA $2A    [$00:002A]   
+######## call [UNKNOWN_12]
+$83/926E 20 DD 9B    JSR $9BDD  [$83:9BDD]   
+$83/9271 C6 2A       DEC $2A    [$00:002A]   
+$83/9273 D0 F9       BNE $F9    [$926E]      
+######## call [RESET_SEARCH_DISTANCE]
+$83/9275 20 27 9B    JSR $9B27  [$83:9B27]   
+# set the maxim position
+######## call [FIND_RANDOM_UNMARKED_ROOM]
+$83/9278 20 11 9D    JSR $9D11  [$83:9D11]   
+$83/927B 8E A9 E6    STX $E6A9  [$7F:E6A9]   
+######## call [UNKNOWN_16]
+$83/927E 20 62 9B    JSR $9B62  [$83:9B62]   
+$83/9281 A2 FF 00    LDX #$00FF              
+# start of loop
+	$83/9284 BD 00 EA    LDA $EA00,x[$7F:EAFF]   
+	$83/9287 F0 04       BEQ $04    [$928D]      
+	$83/9289 89 C0       BIT #$C0                
+	$83/928B F0 03       BEQ $03    [$9290]      
+	$83/928D 82 D3 00    BRL $00D3  [$9363]      
+	$83/9290 85 54       STA $54    [$00:0054]   
+	$83/9292 BD 01 EA    LDA $EA01,x[$7F:EA97]   
+	$83/9295 F0 12       BEQ $12    [$92A9]      
+	$83/9297 BD FF E9    LDA $E9FF,x[$7F:EA94]   
+	$83/929A F0 24       BEQ $24    [$92C0]      
+
+	$83/92A9 BD F1 E9    LDA $E9F1,x[$7F:EA87]   
+	$83/92AC D0 08       BNE $08    [$92B6]      
+	$83/92AE BD 11 EA    LDA $EA11,x[$7F:EAA7]   
+	$83/92B1 D0 03       BNE $03    [$92B6]      
+	$83/92B3 82 AD 00    BRL $00AD  [$9363]      
+
+	$83/92C0 BD EF E9    LDA $E9EF,x[$7F:EA84]   
+	$83/92C3 D0 08       BNE $08    [$92CD]      
+	$83/92CD A5 54       LDA $54    [$00:0054]   
+	$83/92CF 09 40       ORA #$40                
+	$83/92D1 9D FF E9    STA $E9FF,x[$7F:EA94]   
+	$83/92D4 82 8C 00    BRL $008C  [$9363]      
+
+	$83/9363 CA          DEX                     
+	$83/9364 E0 10 00    CPX #$0010              
+	$83/9367 90 03       BCC $03    [$936C]      
+	$83/9369 82 18 FF    BRL $FF18  [$9284]  
+
+************* ?    
+# clear two MSBs on room id data
+######## call [CLEAR_ROOM_ID_FLAGS]
+$83/936C 20 18 9B    JSR $9B18  [$83:9B18]   
+######## call [UNKNOWN_16]
+$83/936F 20 62 9B    JSR $9B62  [$83:9B62]   
+$83/9372 A2 FF 00    LDX #$00FF              
+	$83/9375 BD 00 EA    LDA $EA00,x[$7F:EAFF]   
+	$83/9378 F0 08       BEQ $08    [$9382]      
+	$83/9382 CA          DEX                     
+	$83/9383 E0 10 00    CPX #$0010              
+	$83/9386 B0 ED       BCS $ED    [$9375]      
+$83/9388 A2 00 00    LDX #$0000              
+	$83/938B E4 2D       CPX $2D    [$00:002D]   
+	$83/938D B0 76       BCS $76    [$9405]      
+	$83/938F 86 5A       STX $5A    [$00:005A]   
+	$83/9391 7B          TDC                     
+	$83/9392 BD F1 E6    LDA $E6F1,x[$7F:E6F1]   
+	$83/9395 F0 69       BEQ $69    [$9400]      
+	$83/9397 8D 00 04    STA $0400  [$7F:0400]   
+	$83/939A A8          TAY                     
+	$83/939B B9 00 EA    LDA $EA00,y[$7F:EA91]   
+	$83/939E 85 54       STA $54    [$00:0054]   
+	$83/93A0 B9 10 EA    LDA $EA10,y[$7F:EAA1]   
+	$83/93A3 85 55       STA $55    [$00:0055]   
+	$83/93A5 A9 01       LDA #$01                
+	$83/93A7 85 56       STA $56    [$00:0056]   
+	$83/93A9 64 57       STZ $57    [$00:0057]   
+	$83/93AB 7B          TDC                     
+		$83/93AC E8          INX                     
+		$83/93AD E4 2D       CPX $2D    [$00:002D]   
+		$83/93AF B0 1F       BCS $1F    [$93D0]      
+		$83/93B1 BD F1 E6    LDA $E6F1,x[$7F:E6F2]   
+		$83/93B4 A8          TAY                     
+		$83/93B5 B9 00 EA    LDA $EA00,y[$7F:EA92]   
+		$83/93B8 C5 54       CMP $54    [$00:0054]   
+		$83/93BA D0 F0       BNE $F0    [$93AC]      
+		$83/93BC B9 10 EA    LDA $EA10,y[$7F:EAA2]   
+		$83/93BF C5 55       CMP $55    [$00:0055]   
+		$83/93C1 D0 E9       BNE $E9    [$93AC]      
+		$83/93C3 A4 56       LDY $56    [$00:0056]   
+		$83/93C5 BD F1 E6    LDA $E6F1,x[$7F:E6F2]   
+		$83/93C8 99 00 04    STA $0400,y[$7F:0401]   
+		$83/93CB C8          INY                     
+		$83/93CC 84 56       STY $56    [$00:0056]   
+		$83/93CE 80 DC       BRA $DC    [$93AC]      
+	$83/93D0 A5 56       LDA $56    [$00:0056]   
+	$83/93D2 C9 01       CMP #$01                
+	$83/93D4 F0 2A       BEQ $2A    [$9400]      
+	######## call [MULTIPLY_TIMES_RANDOM]
+	$83/93D6 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+	$83/93D9 EB          XBA                     
+	$83/93DA A9 00       LDA #$00                
+	$83/93DC EB          XBA                     
+	$83/93DD AA          TAX                     
+	$83/93DE A9 FF       LDA #$FF                
+	$83/93E0 9D 00 04    STA $0400,x[$7F:0400]   
+	$83/93E3 A2 00 00    LDX #$0000              
+		$83/93E6 BD F1 E6    LDA $E6F1,x[$7F:E6F1]   
+		$83/93E9 A0 00 00    LDY #$0000              
+			$83/93EC D9 00 04    CMP $0400,y[$7F:0400]   
+			$83/93EF D0 05       BNE $05    [$93F6]      
+
+			$83/93F6 C8          INY                     
+			$83/93F7 C4 56       CPY $56    [$00:0056]   
+			$83/93F9 90 F1       BCC $F1    [$93EC]      
+		$83/93FB E8          INX                     
+		$83/93FC E4 2D       CPX $2D    [$00:002D]   
+		$83/93FE 90 E6       BCC $E6    [$93E6]      
+	$83/9400 A6 5A       LDX $5A    [$00:005A]   
+	$83/9402 E8          INX                     
+	$83/9403 80 86       BRA $86    [$938B]  
+
+************* ?    
+$83/9405 7B          TDC                     
+$83/9406 A5 2D       LDA $2D    [$00:002D]   
+$83/9408 A8          TAY                     
+$83/9409 A9 FF       LDA #$FF                
+$83/940B 99 F1 E6    STA $E6F1,y[$7F:E6F9]   
+######## call [RESET_SEARCH_DISTANCE]
+$83/940E 20 27 9B    JSR $9B27  [$83:9B27]   
+######## call [FIND_RANDOM_UNMARKED_ROOM]
+$83/9411 20 11 9D    JSR $9D11  [$83:9D11]   
+######## call [ROOM_INDEX_TO_MAP_X_Y]
+$83/9414 20 48 9B    JSR $9B48  [$83:9B48]   
+$83/9417 1A          INC A                   
+$83/9418 1A          INC A                   
+$83/9419 1A          INC A                   
+$83/941A 8F B1 05 00 STA $0005B1[$00:05B1]   
+$83/941E 8F AA E6 7F STA $7FE6AA[$7F:E6AA]   
+$83/9422 EB          XBA                     
+$83/9423 1A          INC A                   
+$83/9424 1A          INC A                   
+$83/9425 8F B0 05 00 STA $0005B0[$00:05B0]   
+$83/9429 8F A9 E6 7F STA $7FE6A9[$7F:E6A9]   
+$83/942D A2 00 00    LDX #$0000              
+	$83/9430 7B          TDC                     
+	$83/9431 BD F1 E6    LDA $E6F1,x[$7F:E6F1]   
+	$83/9434 F0 15       BEQ $15    [$944B]      
+	$83/9436 C9 FF       CMP #$FF                
+	$83/9438 F0 14       BEQ $14    [$944E]      
+	$83/943A A8          TAY                     
+	$83/943B B9 00 EA    LDA $EA00,y[$7F:EA91]   
+	$83/943E 09 80       ORA #$80                
+	$83/9440 99 00 EA    STA $EA00,y[$7F:EA91]   
+	$83/9443 B9 10 EA    LDA $EA10,y[$7F:EAA1]   
+	$83/9446 09 80       ORA #$80                
+	$83/9448 99 10 EA    STA $EA10,y[$7F:EAA1]   
+	$83/944B E8          INX                     
+	$83/944C 80 E2       BRA $E2    [$9430]    
+  
+************* is this picking the spot for the steps it inserts later?
+######## call [FIND_RANDOM_UNMARKED_ROOM]
+$83/944E 20 11 9D    JSR $9D11  [$83:9D11]   
+$83/9451 B0 06       BCS $06    [$9459]      
+######## call [ROOM_INDEX_TO_MAP_X_Y]
+$83/9459 20 48 9B    JSR $9B48  [$83:9B48]   
+######## call [UNKNOWN_20]
+$83/945C 20 3C 9B    JSR $9B3C  [$83:9B3C]   
+$83/945F 8F AC E6 7F STA $7FE6AC[$7F:E6AC]   
+$83/9463 EB          XBA                     
+$83/9464 8F AB E6 7F STA $7FE6AB[$7F:E6AB]   
+
+************* maybe create a healing tile
+$83/9468 A9 FF       LDA #$FF                
+$83/946A 8F AD E6 7F STA $7FE6AD[$7F:E6AD]   
+$83/946E 8F AE E6 7F STA $7FE6AE[$7F:E6AE]   
+######## call [GENERATE_RNG]
+$83/9472 22 C7 82 80 JSL $8082C7[$80:82C7]   
+$83/9476 C9 10       CMP #$10                
+$83/9478 B0 15       BCS $15    [$948F]      
+######## call [FIND_RANDOM_UNMARKED_ROOM]
+$83/947A 20 11 9D    JSR $9D11  [$83:9D11]   
+$83/947D 90 10       BCC $10    [$948F]      
+######## call [ROOM_INDEX_TO_MAP_X_Y]
+$83/947F 20 48 9B    JSR $9B48  [$83:9B48]   
+######## call [UNKNOWN_20]
+$83/9482 20 3C 9B    JSR $9B3C  [$83:9B3C]   
+# store it for placement later
+$83/9485 8F AE E6 7F STA $7FE6AE[$7F:E6AE]   
+$83/9489 EB          XBA                     
+$83/948A 1A          INC A                   
+$83/948B 8F AD E6 7F STA $7FE6AD[$7F:E6AD]   
+
+************* enemy generation?
+######## call [CLEAR_ROOM_ID_FLAGS]
+$83/948F 20 18 9B    JSR $9B18  [$83:9B18]   
+$83/9492 A2 13 00    LDX #$0013              
+$83/9495 7B          TDC                     
+	$83/9496 9F B1 E6 7F STA $7FE6B1,x[$7F:E6C4] 
+	$83/949A CA          DEX                     
+	$83/949B 10 F9       BPL $F9    [$9496]      
+######## call [GENERATE_RNG]
+$83/949D 22 C7 82 80 JSL $8082C7[$80:82C7]   
+$83/94A1 C9 10       CMP #$10                
+$83/94A3 B0 70       BCS $70    [$9515]      
+# missing some code here
+$83/9515 A9 04       LDA #$04                
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/9517 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/951A 18          CLC                     
+# this is the value i tweak to give more or fewer enemies.. where does it pick them?
+$83/951B 69 04       ADC #$04                
+$83/951D 85 22       STA $22    [$00:0022]   
+$83/951F 64 23       STZ $23    [$00:0023]   
+$83/9521 A2 00 00    LDX #$0000              
+	# loop target from below
+	$83/9524 A9 02       LDA #$02                
+	######## call [MULTIPLY_TIMES_RANDOM]
+	$83/9526 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+	$83/9529 85 8F       STA $8F    [$00:008F]   
+	$83/952B A9 02       LDA #$02                
+	######## call [MULTIPLY_TIMES_RANDOM]
+	$83/952D 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+	$83/9530 85 91       STA $91    [$00:0091]   
+	$83/9532 86 24       STX $24    [$00:0024]   
+	######## call [FIND_RANDOM_UNMARKED_ROOM]
+	$83/9534 20 11 9D    JSR $9D11  [$83:9D11]   
+	$83/9537 A6 24       LDX $24    [$00:0024]   
+	$83/9539 90 1A       BCC $1A    [$9555]      
+	######## call [ROOM_INDEX_TO_MAP_X_Y]
+	$83/953B 20 48 9B    JSR $9B48  [$83:9B48]   
+	$83/953E A6 24       LDX $24    [$00:0024]   
+	$83/9540 38          SEC                     
+	$83/9541 65 91       ADC $91    [$00:0091]   
+	$83/9543 1A          INC A                   
+	$83/9544 1A          INC A                   
+	$83/9545 85 91       STA $91    [$00:0091]   
+	$83/9547 EB          XBA                     
+	$83/9548 38          SEC                     
+	$83/9549 65 8F       ADC $8F    [$00:008F]   
+	$83/954B 85 8F       STA $8F    [$00:008F]   
+	######## call [UNKNOWN_21]
+	$83/954D 20 D3 99    JSR $99D3  [$83:99D3]   
+	$83/9550 B0 03       BCS $03    [$9555]     
+	# this call has some enemy stuff in it 
+	######## call [UNKNOWN_22]
+	$83/9552 20 1C 9A    JSR $9A1C  [$83:9A1C]   
+	# looks like we run this (enemy generation?) until x hits $22 - which is created above
+	$83/9555 E8          INX                     
+	$83/9556 E4 22       CPX $22    [$00:0022]   
+	$83/9558 90 CA       BCC $CA    [$9524]      
+
+************* placing chests here i think
+$83/955A A2 10 00    LDX #$0010              
+# loop target
+	$83/955D BD 00 EA    LDA $EA00,x[$7F:EA10]   
+	$83/9560 F0 35       BEQ $35    [$9597]      
+	$83/9562 30 33       BMI $33    [$9597]      
+	$83/9564 DD 01 EA    CMP $EA01,x[$7F:EA45]   
+	$83/9567 D0 2E       BNE $2E    [$9597]      
+	$83/9569 DD 10 EA    CMP $EA10,x[$7F:EA54]   
+	$83/956C D0 29       BNE $29    [$9597]      
+	$83/956E DD 11 EA    CMP $EA11,x[$7F:EA55]   
+	$83/9571 D0 24       BNE $24    [$9597]      
+	# mark the 0x80 flag - what does this indicate here?
+	$83/9573 09 80       ORA #$80                
+	$83/9575 9D 00 EA    STA $EA00,x[$7F:EA44]   
+	$83/9578 9D 01 EA    STA $EA01,x[$7F:EA45]   
+	$83/957B 9D 10 EA    STA $EA10,x[$7F:EA54]   
+	$83/957E 9D 11 EA    STA $EA11,x[$7F:EA55]   
+	$83/9581 8A          TXA                     
+	######## call [PLACE_CHEST]
+	$83/9582 20 BC 9A    JSR $9ABC  [$83:9ABC]   
+	$83/9585 B0 10       BCS $10    [$9597]      
+	$83/9587 AD 34 E7    LDA $E734  [$7F:E734]   
+	$83/958A C9 08       CMP #$08                
+	$83/958C B0 0F       BCS $0F    [$959D]      
+	$83/958E A5 59       LDA $59    [$00:0059]   
+	$83/9590 1A          INC A                   
+	$83/9591 85 59       STA $59    [$00:0059]   
+	$83/9593 C9 08       CMP #$08                
+	$83/9595 B0 06       BCS $06    [$959D]      
+	$83/9597 E8          INX                     
+	# loop until x hits 0xf0, and we end the 7FEAxx block
+	$83/9598 E0 F0 00    CPX #$00F0              
+	$83/959B 90 C0       BCC $C0    [$955D]      
+
+************* this seems to be marking room data/walls/corners so it knows which tile data to use
+######## call [CLEAR_ROOM_ID_FLAGS]
+$83/959D 20 18 9B    JSR $9B18  [$83:9B18]   
+$83/95A0 A9 01       LDA #$01                
+$83/95A2 85 91       STA $91    [$00:0091]   
+$83/95A4 64 8F       STZ $8F    [$00:008F]   
+######## call [SET_ROOM_INDEX]
+$83/95A6 20 CB 9C    JSR $9CCB  [$83:9CCB]   
+$83/95A9 9B          TXY                     
+	# loop target
+	$83/95AA B9 00 EA    LDA $EA00,y[$7F:EA10]   
+	$83/95AD D0 03       BNE $03    [$95B2]      
+	$83/95AF 82 81 00    BRL $0081  [$9633]      
+	$83/95B2 85 54       STA $54    [$00:0054]   
+	# looks like it uses the bits in $55 as indicators of whether the same room exists on all of 8 directions
+	# MSB -- LR, R, UR, L, U, LL, L, UL -- LSB
+	$83/95B4 64 55       STZ $55    [$00:0055]   
+	# room number (from center tile)
+	$83/95B6 A5 54       LDA $54    [$00:0054]   
+	# lower right
+	$83/95B8 D9 11 EA    CMP $EA11,y[$7F:EA55]   
+	$83/95BB F0 01       BEQ $01    [$95BE]      
+	$83/95BD 18          CLC                     
+	$83/95BE 26 55       ROL $55    [$00:0055]   
+	# right
+	$83/95C0 D9 01 EA    CMP $EA01,y[$7F:EA45]   
+	$83/95C3 F0 01       BEQ $01    [$95C6]      
+	$83/95C5 18          CLC                     
+	$83/95C6 26 55       ROL $55    [$00:0055]   
+	# upper right
+	$83/95C8 D9 F1 E9    CMP $E9F1,y[$7F:EA35]   
+	$83/95CB F0 01       BEQ $01    [$95CE]      
+	$83/95CD 18          CLC                     
+	$83/95CE 26 55       ROL $55    [$00:0055]   
+	# lower
+	$83/95D0 D9 10 EA    CMP $EA10,y[$7F:EA54]   
+	$83/95D3 F0 01       BEQ $01    [$95D6]      
+	$83/95D5 18          CLC                     
+	$83/95D6 26 55       ROL $55    [$00:0055]   
+	# upper
+	$83/95D8 D9 F0 E9    CMP $E9F0,y[$7F:EA34]   
+	$83/95DB F0 01       BEQ $01    [$95DE]      
+	$83/95DD 18          CLC                     
+	$83/95DE 26 55       ROL $55    [$00:0055]   
+	$83/95E0 A5 54       LDA $54    [$00:0054]   
+	# lower left
+	$83/95E2 D9 0F EA    CMP $EA0F,y[$7F:EA53]   
+	$83/95E5 F0 01       BEQ $01    [$95E8]      
+	$83/95E7 18          CLC                     
+	$83/95E8 26 55       ROL $55    [$00:0055]   
+	# left
+	$83/95EA D9 FF E9    CMP $E9FF,y[$7F:EA43]   
+	$83/95ED F0 01       BEQ $01    [$95F0]      
+	$83/95EF 18          CLC                     
+	$83/95F0 26 55       ROL $55    [$00:0055]   
+	# upper left
+	$83/95F2 D9 EF E9    CMP $E9EF,y[$7F:EA33]   
+	$83/95F5 F0 01       BEQ $01    [$95F8]      
+	$83/95F7 18          CLC                     
+	$83/95F8 26 55       ROL $55    [$00:0055]   
+	# now process the $55 then use it as the index for loading the tile block for 7FEBxx
+	$83/95FA A5 55       LDA $55    [$00:0055]   
+	$83/95FC 10 06       BPL $06    [$9604]      
+	$83/95FE 29 50       AND #$50                
+	$83/9600 D0 02       BNE $02    [$9604]      
+	$83/9602 14 55       TRB $55
+	$83/9604 A5 55       LDA $55    [$00:0055]   
+	$83/9606 89 04       BIT #$04                
+	$83/9608 F0 06       BEQ $06    [$9610]      
+	$83/960A 29 12       AND #$12                
+	$83/960C D0 02       BNE $02    [$9610]      
+	$83/960E 14 55       TRB $55
+	$83/9610 A5 55       LDA $55    [$00:0055]   
+	$83/9612 89 01       BIT #$01                
+	$83/9614 F0 06       BEQ $06    [$961C]      
+	$83/9616 29 0A       AND #$0A                
+	$83/9618 D0 02       BNE $02    [$961C]      
+	$83/961A 14 55       TRB $55
+	$83/961C A5 55       LDA $55    [$00:0055]   
+	$83/961E 89 20       BIT #$20                
+	$83/9620 F0 06       BEQ $06    [$9628]      
+	$83/9622 29 48       AND #$48                
+	$83/9624 D0 02       BNE $02    [$9628]      
+	$83/9626 14 55       TRB $55
+	$83/9628 7B          TDC                     
+	$83/9629 A5 55       LDA $55    [$00:0055]   
+	$83/962B AA          TAX                     
+	# fill in 7FEBxx with the appropriate tile collection thingy id
+	$83/962C BF 9B D5 93 LDA $93D59B,x[$93:D66B] 
+	$83/9630 99 00 EB    STA $EB00,y[$7F:EB44]   
+	$83/9633 C8          INY           
+	# loop over every spot in the room data          
+	$83/9634 C0 F0 00    CPY #$00F0              
+	$83/9637 B0 03       BCS $03    [$963C]      
+	$83/9639 82 6E FF    BRL $FF6E  [$95AA]  
+
+************* this is setting those 33-38 values on the left side of the map data, still not sure what they are for
+$83/963C A0 10 00    LDY #$0010              
+$83/963F A2 00 00    LDX #$0000              
+	$83/9642 8A          TXA                     
+	$83/9643 18          CLC                     
+	$83/9644 69 33       ADC #$33                
+	$83/9646 99 00 EB    STA $EB00,y[$7F:EB10]   
+	$83/9649 98          TYA                     
+	$83/964A 18          CLC                     
+	$83/964B 69 10       ADC #$10                
+	$83/964D A8          TAY                     
+	$83/964E E8          INX                     
+	$83/964F E0 06 00    CPX #$0006              
+	$83/9652 90 EE       BCC $EE    [$9642]      
+
+************* map data decompression to 7e4000
+$83/9654 C2 30       REP #$30                
+$83/9656 AD 99 E6    LDA $E699  [$7F:E699]   
+$83/9659 85 54       STA $54    [$00:0054]    # source block
+$83/965B A9 00 40    LDA #$4000              
+$83/965E 85 60       STA $60    [$00:0060]    # destination offset
+$83/9660 E2 20       SEP #$20                
+$83/9662 A9 7E       LDA #$7E                
+$83/9664 85 62       STA $62    [$00:0062]    # destination bank
+# decompress block of map data that we pull pieces out of later, to 7E4000
+######## call [DECOMPRESS_DATA]
+$83/9666 22 9D 8E 80 JSL $808E9D[$80:8E9D]   
+
+************* wipe out map data from previous floor
+$83/966A C2 20       REP #$20                
+$83/966C 9C 00 00    STZ $0000  [$7F:0000]   
+$83/966F A2 00 00    LDX #$0000              
+$83/9672 A0 02 00    LDY #$0002              
+$83/9675 A9 1A 7E    LDA #$7E1A              
+# this was really long - it blanks out the map data before rewriting it based on the above stuff
+$83/9678 54 7F 7F    MVN 7F 7F               
+# some sort of header for tile data blocks?  10 bytes here out of ROM into 7F0000
+$83/967B A2 3F 9F    LDX #$9F3F              
+$83/967E A0 00 00    LDY #$0000              
+$83/9681 A9 09 00    LDA #$0009              
+# and 4 bytes here from ROM into 7F3F0A
+$83/9684 54 7F 83    MVN 83 7F               
+$83/9687 A2 45 9F    LDX #$9F45              
+$83/968A A0 0A 3F    LDY #$3F0A              
+$83/968D A9 03 00    LDA #$0003              
+$83/9690 54 7F 83    MVN 83 7F         
+
+************* write tile data for map at 7F000A and 7F3F0E by pulling the 7FEBxx values, looking them up, and writing those tile arrays
+$83/9693 E2 20       SEP #$20                
+$83/9695 A9 10       LDA #$10                
+$83/9697 85 23       STA $23    [$00:0023]   
+# set y loop index
+$83/9699 A9 0E       LDA #$0E                
+$83/969B 85 27       STA $27    [$00:0027]   
+$83/969D A2 10 00    LDX #$0010              
+	# outer loop target
+	# set x loop index
+	$83/96A0 A9 10       LDA #$10                
+	$83/96A2 85 26       STA $26    [$00:0026]   
+		# inner loop target
+		$83/96A4 BF 00 EB 7F LDA $7FEB00,x[$7F:EB10] 
+		# ID of the first block to copy in = x33 -> mul by 4 = 0xcc = index into $93D69B = 9d69b to grab later
+		$83/96A8 C9 1C       CMP #$1C                
+		# skip processing if it's 1C, a blank section
+		$83/96AA F0 14       BEQ $14    [$96C0]      
+		$83/96AC 85 22       STA $22    [$00:0022]   
+		$83/96AE DA          PHX                     
+		$83/96AF A5 23       LDA $23    [$00:0023]   
+		######## call [ROOM_INDEX_TO_MAP_X_Y]
+		$83/96B1 20 48 9B    JSR $9B48  [$83:9B48]   
+		$83/96B4 85 91       STA $91    [$00:0091]   
+		$83/96B6 EB          XBA                     
+		$83/96B7 85 8F       STA $8F    [$00:008F]   
+		######## call [GET_TILE_INDEX_FROM_ROOM_X_Y]
+		$83/96B9 20 68 9D    JSR $9D68  [$83:9D68]   
+		######## call [WRITE_TILE_BLOCK]
+		$83/96BC 20 88 9D    JSR $9D88  [$83:9D88]   
+		$83/96BF FA          PLX                     
+		$83/96C0 E6 23       INC $23    [$00:0023]   
+		$83/96C2 E8          INX                     
+		$83/96C3 C6 26       DEC $26    [$00:0026]   
+		# inner loop
+		$83/96C5 D0 DD       BNE $DD    [$96A4]      
+	$83/96C7 C6 27       DEC $27    [$00:0027]   
+	# outer loop
+	$83/96C9 D0 D5       BNE $D5    [$96A0]      
+
+************* another loop that is writing to tile data, this one is inserting the doorway blocks
+$83/96CB A2 00 00    LDX #$0000              
+	$83/96CE BD F1 E6    LDA $E6F1,x[$7F:E6F1]   
+	$83/96D1 F0 1F       BEQ $1F    [$96F2]      
+	$83/96D3 C9 FF       CMP #$FF                
+	$83/96D5 F0 1E       BEQ $1E    [$96F5]      
+	$83/96D7 DA          PHX                     
+	$83/96D8 BD F1 E6    LDA $E6F1,x[$7F:E6F1]   
+	######## call [ROOM_INDEX_TO_MAP_X_Y]
+	$83/96DB 20 48 9B    JSR $9B48  [$83:9B48]   
+	$83/96DE 18          CLC                     
+	$83/96DF 69 04       ADC #$04                
+	$83/96E1 85 91       STA $91    [$00:0091]   
+	$83/96E3 EB          XBA                     
+	$83/96E4 1A          INC A                   
+	$83/96E5 85 8F       STA $8F    [$00:008F]   
+	######## call [GET_TILE_INDEX_FROM_ROOM_X_Y]
+	$83/96E7 20 68 9D    JSR $9D68  [$83:9D68]   
+	$83/96EA A9 39       LDA #$39                
+	$83/96EC 85 22       STA $22    [$00:0022]   
+	######## call [WRITE_TILE_BLOCK]
+	$83/96EE 20 88 9D    JSR $9D88  [$83:9D88]   
+	$83/96F1 FA          PLX                     
+	$83/96F2 E8          INX                     
+	$83/96F3 80 D9       BRA $D9    [$96CE]  
+
+************* ?    
+$83/96F5 A2 00 00    LDX #$0000              
+$83/96F8 64 56       STZ $56    [$00:0056]   
+$83/96FA 64 57       STZ $57    [$00:0057]   
+	$83/96FC DA          PHX                     
+	$83/96FD A4 56       LDY $56    [$00:0056]   
+	$83/96FF A9 FF       LDA #$FF                
+	$83/9701 99 00 C0    STA $C000,y[$7F:C000]   
+	$83/9704 99 01 C0    STA $C001,y[$7F:C001]   
+	$83/9707 A9 05       LDA #$05                
+	$83/9709 EB          XBA                     
+	$83/970A 8A          TXA                     
+	$83/970B A2 0A 00    LDX #$000A              
+	######## call [UNKNOWN_28]
+	$83/970E 22 AA BF 80 JSL $80BFAA[$80:BFAA]   
+	$83/9712 B0 38       BCS $38    [$974C]      
+	$83/9714 BF 01 F0 7E LDA $7EF001,x[$7E:F07F] 
+	$83/9718 85 8F       STA $8F    [$00:008F]   
+	$83/971A BF 02 F0 7E LDA $7EF002,x[$7E:F080] 
+	$83/971E 85 91       STA $91    [$00:0091]   
+	######## call [UNKNOWN_20]
+	$83/9720 20 D6 9C    JSR $9CD6  [$83:9CD6]   
+	$83/9723 C2 20       REP #$20                
+	$83/9725 BF 0C 40 7E LDA $7E400C,x[$7E:4048] 
+	$83/9729 99 00 C1    STA $C100,y[$7F:C100]   
+	$83/972C BF 0E 40 7E LDA $7E400E,x[$7E:404A] 
+	$83/9730 99 00 C2    STA $C200,y[$7F:C200]   
+	$83/9733 BF 10 40 7E LDA $7E4010,x[$7E:404C] 
+	$83/9737 99 00 C3    STA $C300,y[$7F:C300]   
+	$83/973A BF 0A 40 7E LDA $7E400A,x[$7E:4046] 
+	$83/973E 99 00 C0    STA $C000,y[$7F:C000]   
+	$83/9741 BB          TYX                     
+	$83/9742 9F 22 00 00 STA $000022,x[$00:0022] 
+	$83/9746 C8          INY                     
+	$83/9747 C8          INY                     
+	$83/9748 84 56       STY $56    [$00:0056]   
+	$83/974A E2 20       SEP #$20                
+	$83/974C FA          PLX                     
+	$83/974D E8          INX                     
+	$83/974E E0 04 00    CPX #$0004              
+	$83/9751 90 A9       BCC $A9    [$96FC]      
+$83/9753 A2 10 00    LDX #$0010              
+	$83/9756 BD 00 EA    LDA $EA00,x[$7F:EA10]   
+	$83/9759 D0 03       BNE $03    [$975E]      
+	$83/975B 82 81 00    BRL $0081  [$97DF]      
+	$83/975E 85 56       STA $56    [$00:0056]   
+	$83/9760 DA          PHX                     
+	$83/9761 8A          TXA                     
+	######## call [ROOM_INDEX_TO_MAP_X_Y]
+	$83/9762 20 48 9B    JSR $9B48  [$83:9B48]   
+	$83/9765 85 91       STA $91    [$00:0091]   
+	$83/9767 EB          XBA                     
+	$83/9768 85 8F       STA $8F    [$00:008F]   
+	######## call [UNKNOWN_30]
+	$83/976A 20 F3 9C    JSR $9CF3  [$83:9CF3]   
+	$83/976D A5 56       LDA $56    [$00:0056]   
+	$83/976F 29 03       AND #$03                
+	$83/9771 F0 69       BEQ $69    [$97DC]      
+	$83/9773 EB          XBA                     
+	$83/9774 A9 00       LDA #$00                
+	$83/9776 AA          TAX                     
+	$83/9777 C2 20       REP #$20                
+	$83/9779 BD 00 C0    LDA $C000,x[$7F:C300]   
+	$83/977C 85 11       STA $11    [$00:0011]   
+	$83/977E BD 02 C0    LDA $C002,x[$7F:C302]   
+	$83/9781 85 13       STA $13    [$00:0013]   
+	$83/9783 BD 04 C0    LDA $C004,x[$7F:C304]   
+	$83/9786 85 15       STA $15    [$00:0015]   
+	$83/9788 BD 06 C0    LDA $C006,x[$7F:C306]   
+	$83/978B 85 17       STA $17    [$00:0017]   
+	$83/978D A9 06 00    LDA #$0006              
+	$83/9790 85 58       STA $58    [$00:0058]   
+		$83/9792 A9 06 00    LDA #$0006              
+		$83/9795 85 56       STA $56    [$00:0056]   
+			$83/9797 B9 0A 00    LDA $000A,y[$7F:0DBA]   
+			$83/979A 29 FF 03    AND #$03FF              
+			$83/979D C5 22       CMP $22    [$00:0022]   
+			$83/979F F0 18       BEQ $18    [$97B9]      
+			$83/97A1 C5 24       CMP $24    [$00:0024]   
+			$83/97A3 F0 10       BEQ $10    [$97B5]      
+			$83/97A5 C5 26       CMP $26    [$00:0026]   
+			$83/97A7 F0 08       BEQ $08    [$97B1]      
+			$83/97A9 C5 28       CMP $28    [$00:0028]   
+			$83/97AB D0 1B       BNE $1B    [$97C8]      
+
+			$83/97C8 C6 56       DEC $56    [$00:0056]   
+			$83/97CA F0 04       BEQ $04    [$97D0]      
+			$83/97CC C8          INY                     
+			$83/97CD C8          INY                     
+			$83/97CE 80 C7       BRA $C7    [$9797]      
+		$83/97D0 C6 58       DEC $58    [$00:0058]   
+		$83/97D2 F0 08       BEQ $08    [$97DC]      
+		$83/97D4 98          TYA                     
+		$83/97D5 18          CLC                     
+		$83/97D6 69 B6 00    ADC #$00B6              
+		$83/97D9 A8          TAY                     
+		$83/97DA D0 B6       BNE $B6    [$9792]      
+	$83/97DC E2 20       SEP #$20                
+	$83/97DE FA          PLX                     
+	$83/97DF E8          INX                     
+	$83/97E0 E0 F0 00    CPX #$00F0              
+	$83/97E3 B0 03       BCS $03    [$97E8]      
+	$83/97E5 82 6E FF    BRL $FF6E  [$9756]    
+$83/97E8 64 56       STZ $56    [$00:0056]   
+$83/97EA 64 57       STZ $57    [$00:0057]   
+$83/97EC A2 03 00    LDX #$0003              
+	$83/97EF DA          PHX                     
+	$83/97F0 A9 0A       LDA #$0A                
+	$83/97F2 EB          XBA                     
+	$83/97F3 8A          TXA                     
+	$83/97F4 A2 04 00    LDX #$0004              
+	######## call [UNKNOWN_28]
+	$83/97F7 22 AA BF 80 JSL $80BFAA[$80:BFAA]   
+	$83/97FB A4 56       LDY $56    [$00:0056]   
+	$83/97FD 90 0E       BCC $0E    [$980D]      
+
+	$83/980D BF 02 F0 7E LDA $7EF002,x[$7E:F04D] 
+	$83/9811 85 8F       STA $8F    [$00:008F]   
+	$83/9813 BF 03 F0 7E LDA $7EF003,x[$7E:F04E] 
+	$83/9817 85 91       STA $91    [$00:0091]   
+	$83/9819 BF 08 F0 7E LDA $7EF008,x[$7E:F053] 
+	$83/981D 99 00 C0    STA $C000,y[$7F:C000]   
+	$83/9820 85 58       STA $58    [$00:0058]   
+	$83/9822 64 59       STZ $59    [$00:0059]   
+	$83/9824 BF 09 F0 7E LDA $7EF009,x[$7E:F054] 
+	$83/9828 3A          DEC A                   
+	$83/9829 99 01 C0    STA $C001,y[$7F:C001]   
+	######## call [UNKNOWN_20]
+	$83/982C 20 D6 9C    JSR $9CD6  [$83:9CD6]   
+	$83/982F C2 20       REP #$20                
+		$83/9831 98          TYA                     
+		$83/9832 69 00 01    ADC #$0100              
+		$83/9835 A8          TAY                     
+		$83/9836 BF 0A 40 7E LDA $7E400A,x[$7E:402E] 
+		$83/983A 99 00 C0    STA $C000,y[$7F:C100]   
+		$83/983D BF 6A 40 7E LDA $7E406A,x[$7E:408E] 
+		$83/9841 99 02 C0    STA $C002,y[$7F:C102]   
+		$83/9844 BF CE 4F 7E LDA $7E4FCE,x[$7E:4FF2] 
+		$83/9848 99 04 C0    STA $C004,y[$7F:C104]   
+		$83/984B BF 2E 50 7E LDA $7E502E,x[$7E:5052] 
+		$83/984F 99 06 C0    STA $C006,y[$7F:C106]   
+		$83/9852 E8          INX                     
+		$83/9853 E8          INX                     
+		$83/9854 C6 58       DEC $58    [$00:0058]   
+		$83/9856 D0 D9       BNE $D9    [$9831]      
+	$83/9858 A5 56       LDA $56    [$00:0056]   
+	$83/985A 18          CLC                     
+	$83/985B 69 08 00    ADC #$0008              
+	$83/985E 85 56       STA $56    [$00:0056]   
+	$83/9860 E2 20       SEP #$20                
+	$83/9862 FA          PLX                     
+	$83/9863 E8          INX                     
+	$83/9864 E0 08 00    CPX #$0008              
+	$83/9867 90 86       BCC $86    [$97EF]      
+$83/9869 A2 10 00    LDX #$0010              
+    $83/986C DA          PHX                     
+    $83/986D BD 00 EA    LDA $EA00,x[$7F:EA10]   
+    $83/9870 D0 03       BNE $03    [$9875]      
+    $83/9872 82 AF 00    BRL $00AF  [$9924]      
+    $83/9875 8A          TXA                     
+    ######## call [ROOM_INDEX_TO_MAP_X_Y]
+    $83/9876 20 48 9B    JSR $9B48  [$83:9B48]   
+    $83/9879 85 91       STA $91    [$00:0091]   
+    $83/987B EB          XBA                     
+    $83/987C 85 8F       STA $8F    [$00:008F]   
+    ######## call [UNKNOWN_30]
+    $83/987E 20 F3 9C    JSR $9CF3  [$83:9CF3]   
+    $83/9881 C2 20       REP #$20                
+    $83/9883 A9 06 00    LDA #$0006              
+    $83/9886 85 58       STA $58    [$00:0058]   
+    $83/9888 A9 06 00    LDA #$0006              
+    $83/988B 85 56       STA $56    [$00:0056]   
+
+    ************* garbage generation
+        # begin loop for creating garbage on floor
+        ######## call [GENERATE_RNG]
+        $83/988D 22 C7 82 80 JSL $8082C7[$80:82C7]   
+        # generate garbage for tile?
+        $83/9891 C9 30 00    CMP #$0030              
+        $83/9894 B0 76       BCS $76    [$990C]      
+        $83/9896 B9 0E 3F    LDA $3F0E,y[$7F:4CC2]   
+        $83/9899 29 FF 03    AND #$03FF              
+        $83/989C D0 6E       BNE $6E    [$990C]      
+        $83/989E B9 0A 00    LDA $000A,y[$7F:0E7E]   
+        $83/98A1 29 FF 03    AND #$03FF              
+        $83/98A4 85 54       STA $54    [$00:0054]   
+        $83/98A6 A2 00 00    LDX #$0000              
+            $83/98A9 A5 54       LDA $54    [$00:0054]   
+            $83/98AB DD 00 C1    CMP $C100,x[$7F:C100]   
+            $83/98AE F0 0D       BEQ $0D    [$98BD]      
+            $83/98B0 8A          TXA                     
+            $83/98B1 18          CLC                     
+            $83/98B2 69 08 00    ADC #$0008              
+            $83/98B5 AA          TAX                     
+            $83/98B6 E0 28 00    CPX #$0028              
+            $83/98B9 90 EE       BCC $EE    [$98A9]      
+        $83/98BB 80 4F       BRA $4F    [$990C]      
+        $83/98BD 86 54       STX $54    [$00:0054]   
+        $83/98BF E2 20       SEP #$20                
+        $83/98C1 BD 01 C0    LDA $C001,x[$7F:C001]   
+        $83/98C4 85 5A       STA $5A    [$00:005A]   
+        $83/98C6 64 5B       STZ $5B    [$00:005B]   
+        $83/98C8 BD 00 C0    LDA $C000,x[$7F:C000]   
+        ######## call [MULTIPLY_TIMES_RANDOM]
+        $83/98CB 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+        $83/98CE 1A          INC A                   
+        $83/98CF EB          XBA                     
+        $83/98D0 A9 00       LDA #$00                
+        $83/98D2 C2 20       REP #$20                
+        $83/98D4 18          CLC                     
+        $83/98D5 65 54       ADC $54    [$00:0054]   
+        $83/98D7 AA          TAX                     
+        # insert garbage type tile - bush etc
+        # layer 1
+        $83/98D8 B9 0A 00    LDA $000A,y[$7F:1000]   
+        $83/98DB 29 00 FC    AND #$FC00              
+        $83/98DE 1D 00 C0    ORA $C000,x[$7F:C300]   
+        $83/98E1 99 0A 00    STA $000A,y[$7F:1000]   
+        # layer 2
+        $83/98E4 B9 0E 3F    LDA $3F0E,y[$7F:4F04]   
+        $83/98E7 29 00 FC    AND #$FC00              
+        $83/98EA 1D 04 C0    ORA $C004,x[$7F:C304]   
+        $83/98ED 99 0E 3F    STA $3F0E,y[$7F:4F04]   
+        $83/98F0 A5 5A       LDA $5A    [$00:005A]   
+        $83/98F2 F0 18       BEQ $18    [$990C]      
+        # again?  why?
+        # layer 1
+        $83/98F4 B9 CA 00    LDA $00CA,y[$7F:0F4E]   
+        $83/98F7 29 00 FC    AND #$FC00              
+        $83/98FA 1D 02 C0    ORA $C002,x[$7F:C622]   
+        $83/98FD 99 CA 00    STA $00CA,y[$7F:0F4E]   
+        # layer 2
+        $83/9900 B9 CE 3F    LDA $3FCE,y[$7F:4E52]   
+        $83/9903 29 00 FC    AND #$FC00              
+        $83/9906 1D 06 C0    ORA $C006,x[$7F:C626]   
+        $83/9909 99 CE 3F    STA $3FCE,y[$7F:4E52]   
+        # skip location for garbage placement above
+        $83/990C C6 56       DEC $56    [$00:0056]
+        # escape loop when $56 hits zero   
+        $83/990E F0 05       BEQ $05    [$9915]      
+        $83/9910 C8          INY                     
+        $83/9911 C8          INY                     
+        $83/9912 82 78 FF    BRL $FF78  [$988D]      
+    # escape point for garbage generation loop above
+
+    ************* ? part of the garbage loop too?
+    $83/9915 C6 58       DEC $58    [$00:0058]   
+    $83/9917 F0 0B       BEQ $0B    [$9924]      
+    $83/9919 98          TYA                     
+    $83/991A 18          CLC                     
+    $83/991B 69 B6 00    ADC #$00B6              
+    $83/991E A8          TAY                     
+    $83/991F F0 03       BEQ $03    [$9924]      
+    $83/9921 82 64 FF    BRL $FF64  [$9888]      
+    $83/9924 E2 20       SEP #$20                
+    $83/9926 FA          PLX                     
+    $83/9927 E8          INX                     
+    $83/9928 E0 F0 00    CPX #$00F0              
+    $83/992B B0 03       BCS $03    [$9930]      
+    $83/992D 82 3C FF    BRL $FF3C  [$986C]      
+
+************* add special things (steps, chests, etc)
+# it's a while before we get here.
+# what is this?
+$83/9930 AD A9 E6    LDA $E6A9  [$7F:E6A9]   
+$83/9933 EB          XBA                     
+$83/9934 AD AA E6    LDA $E6AA  [$7F:E6AA]   
+######## call [UNKNOWN_31]
+$83/9937 20 C8 99    JSR $99C8  [$83:99C8]   
+$83/993A 7B          TDC     
+# inserting something, not sure what.. quite possibly healing tiles
+######## call [UNKNOWN_32]
+$83/993B 20 46 9D    JSR $9D46  [$83:9D46]   
+$83/993E E2 20       SEP #$20                
+$83/9940 AD AD E6    LDA $E6AD  [$7F:E6AD]   
+$83/9943 C9 FF       CMP #$FF                
+$83/9945 F0 12       BEQ $12    [$9959]      
+
+$83/9959 AD AB E6    LDA $E6AB  [$7F:E6AB]   
+$83/995C EB          XBA                     
+$83/995D AD AC E6    LDA $E6AC  [$7F:E6AC]   
+######## call [UNKNOWN_31]
+$83/9960 20 C8 99    JSR $99C8  [$83:99C8]   
+$83/9963 AD 58 44    LDA $4458  [$7F:4458]   
+# is this inserting the steps?
+######## call [UNKNOWN_32]
+$83/9966 20 46 9D    JSR $9D46  [$83:9D46]   
+$83/9969 E2 20       SEP #$20                
+$83/996B A2 00 00    LDX #$0000     
+    # begin chest map object generation         
+    $83/996E 8A          TXA                     
+    $83/996F CD 34 E7    CMP $E734  [$7F:E734]   
+    # this looks like how we quit out of the chest generation loop
+    $83/9972 B0 28       BCS $28    [$999C]      
+    $83/9974 BD 36 E7    LDA $E736,x[$7F:E736]   
+    $83/9977 EB          XBA                     
+    $83/9978 BD 3E E7    LDA $E73E,x[$7F:E73E]   
+    ######## call [UNKNOWN_31]
+    $83/997B 20 C8 99    JSR $99C8  [$83:99C8]   
+    $83/997E DA          PHX                     
+    $83/997F 8A          TXA                     
+    $83/9980 0A          ASL A                   
+    $83/9981 AA          TAX                     
+    $83/9982 BF 46 E7 7F LDA $7FE746,x[$7F:E746] 
+    $83/9986 89 00 40    BIT #$4000              
+    $83/9989 F0 05       BEQ $05    [$9990]      
+
+    $83/9990 AD 4E 47    LDA $474E  [$7F:474E]   
+    # this is inserting the chests into the map data
+    ######## call [UNKNOWN_32]
+    $83/9993 20 46 9D    JSR $9D46  [$83:9D46]   
+    $83/9996 E2 20       SEP #$20                
+    $83/9998 FA          PLX                     
+    $83/9999 E8          INX                     
+    # loop back and generate more chests
+    $83/999A 80 D2       BRA $D2    [$996E]      
+
+************* ?
+$83/999C 9C 38 D0    STZ $D038  [$7F:D038]   
+$83/999F 9C 39 D0    STZ $D039  [$7F:D039]   
+$83/99A2 A2 00 00    LDX #$0000              
+$83/99A5 86 5D       STX $5D    [$00:005D]   
+######## call [UNKNOWN_33]
+$83/99A7 22 AA EB 80 JSL $80EBAA[$80:EBAA]   
+$83/99AB A2 0E 7E    LDX #$7E0E              
+$83/99AE 86 2D       STX $2D    [$00:002D]   
+$83/99B0 C2 20       REP #$20                
+$83/99B2 64 28       STZ $28    [$00:0028]   
+$83/99B4 AF 9B E6 7F LDA $7FE69B[$7F:E69B]   
+######## call [UNKNOWN_34]
+$83/99B8 22 98 EC 80 JSL $80EC98[$80:EC98]   
+# this has to do with which room i'm in, removing it makes me see everywhere at once
+######## call [UNKNOWN_37]
+$83/99BC 22 78 EC 80 JSL $80EC78[$80:EC78]   
+$83/99C0 E2 20       SEP #$20                
+######## call [UNKNOWN_38]
+$83/99C2 22 18 EC 80 JSL $80EC18[$80:EC18]   
+$83/99C6 AB          PLB                     
+$83/99C7 60          RTS                     
+
+
+
+
+
+
+
+#################################
+########### $80E898 [UNKNOWN_40]:
+#################################
+$80/E898 85 54       STA $54    [$00:0054]   
+$80/E89A 29 07       AND #$07                
+$80/E89C AA          TAX                     
+$80/E89D BF 45 BE 80 LDA $80BE45,x[$80:BE49] 
+$80/E8A1 85 55       STA $55    [$00:0055]   
+$80/E8A3 7B          TDC                     
+$80/E8A4 A5 54       LDA $54    [$00:0054]   
+$80/E8A6 4A          LSR A                   
+$80/E8A7 4A          LSR A                   
+$80/E8A8 4A          LSR A                   
+$80/E8A9 AA          TAX                     
+$80/E8AA A5 55       LDA $55    [$00:0055]   
+$80/E8AC 6B          RTL                     
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $83C652 [UNKNOWN_39]:
+#################################
+# related to maxim positioning somehow - stubbing this out sticks me elsewhere
+# also related to placing chests i think
+# 060, 3E0 instead of 1e0, 140
+$83/C652 8B          PHB                     
+$83/C653 85 54       STA $54    [$00:0054]   
+$83/C655 A9 00       LDA #$00                
+$83/C657 48          PHA                     
+$83/C658 AB          PLB                     
+$83/C659 A0 00 00    LDY #$0000              
+$83/C65C 5A          PHY                     
+$83/C65D 7B          TDC                     
+$83/C65E B9 7B 0A    LDA $0A7B,y[$00:0A7B]   
+$83/C661 C9 FF       CMP #$FF                
+$83/C663 F0 1F       BEQ $1F    [$C684]      
+$83/C665 0A          ASL A                   
+$83/C666 AA          TAX                     
+$83/C667 C2 20       REP #$20                
+$83/C669 BF BA 9E 85 LDA $859EBA,x[$85:9EBA] 
+$83/C66D 18          CLC                     
+$83/C66E 69 96 00    ADC #$0096              
+$83/C671 85 56       STA $56    [$00:0056]   
+$83/C673 E2 20       SEP #$20                
+$83/C675 A0 00 00    LDY #$0000              
+$83/C678 A5 54       LDA $54    [$00:0054]   
+$83/C67A D1 56       CMP ($56),y[$00:0C43]   
+$83/C67C F0 10       BEQ $10    [$C68E]      
+$83/C67E C8          INY                     
+$83/C67F C0 24 00    CPY #$0024              
+$83/C682 90 F6       BCC $F6    [$C67A]      
+$83/C684 7A          PLY                     
+$83/C685 C8          INY                     
+$83/C686 C0 04 00    CPY #$0004              
+$83/C689 90 D1       BCC $D1    [$C65C]      
+$83/C68B AB          PLB                     
+$83/C68C 18          CLC                     
+$83/C68D 6B          RTL                     
+
+
+
+
+
+
+
+#################################
+########### $80EC18 [UNKNOWN_38]:
+#################################
+$80/EC18 7B          TDC                     
+$80/EC19 AF AA 05 00 LDA $0005AA[$00:05AA]   
+$80/EC1D AA          TAX                     
+$80/EC1E BD 10 D0    LDA $D010,x[$7F:D012]   
+$80/EC21 8F 02 42 00 STA $004202[$00:4202]   
+$80/EC25 BD 18 D0    LDA $D018,x[$7F:D01A]   
+$80/EC28 8F 03 42 00 STA $004203[$00:4203]   
+$80/EC2C C2 20       REP #$20                
+$80/EC2E BD 08 D0    LDA $D008,x[$7F:D00A]   
+$80/EC31 AA          TAX                     
+$80/EC32 AF 16 42 00 LDA $004216[$00:4216]   
+$80/EC36 18          CLC                     
+$80/EC37 69 03 00    ADC #$0003              
+$80/EC3A 4A          LSR A                   
+$80/EC3B 4A          LSR A                   
+$80/EC3C 85 58       STA $58    [$00:0058]   
+$80/EC3E E2 20       SEP #$20                
+$80/EC40 A0 00 00    LDY #$0000              
+    $80/EC43 BD 01 00    LDA $0001,x[$7F:3F0F]   
+    $80/EC46 29 30       AND #$30                
+    $80/EC48 4A          LSR A                   
+    $80/EC49 4A          LSR A                   
+    $80/EC4A 4A          LSR A                   
+    $80/EC4B 4A          LSR A                   
+    $80/EC4C 85 54       STA $54    [$00:0054]   
+    $80/EC4E E8          INX                     
+    $80/EC4F E8          INX                     
+    $80/EC50 BD 01 00    LDA $0001,x[$7F:3F11]   
+    $80/EC53 29 30       AND #$30                
+    $80/EC55 4A          LSR A                   
+    $80/EC56 4A          LSR A                   
+    $80/EC57 04 54       TSB $54    [$00:0054]   
+    $80/EC59 E8          INX                     
+    $80/EC5A E8          INX                     
+    $80/EC5B BD 01 00    LDA $0001,x[$7F:3F13]   
+    $80/EC5E 29 30       AND #$30                
+    $80/EC60 04 54       TSB $54    [$00:0054]   
+    $80/EC62 E8          INX                     
+    $80/EC63 E8          INX                     
+    $80/EC64 BD 01 00    LDA $0001,x[$7F:3F15]   
+    $80/EC67 29 30       AND #$30                
+    $80/EC69 0A          ASL A                   
+    $80/EC6A 0A          ASL A                   
+    $80/EC6B 05 54       ORA $54    [$00:0054]   
+    $80/EC6D 99 00 C0    STA $C000,y[$7F:C000]   
+    $80/EC70 E8          INX                     
+    $80/EC71 E8          INX                     
+    $80/EC72 C8          INY                     
+    $80/EC73 C4 58       CPY $58    [$00:0058]   
+    $80/EC75 D0 CC       BNE $CC    [$EC43]      
+# ^ this loops for a really long time.
+$80/EC77 6B          RTL                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $80EC78 [UNKNOWN_37]:
+#################################
+$80/EC78 E2 20       SEP #$20                
+$80/EC7A 7B          TDC                     
+$80/EC7B AF AA 05 00 LDA $0005AA[$00:05AA]   
+$80/EC7F AA          TAX                     
+$80/EC80 BD 10 D0    LDA $D010,x[$7F:D012]   
+$80/EC83 8F B9 05 00 STA $0005B9[$00:05B9]   
+$80/EC87 BD 18 D0    LDA $D018,x[$7F:D01A]   
+$80/EC8A 8F BB 05 00 STA $0005BB[$00:05BB]   
+$80/EC8E 7B          TDC                     
+$80/EC8F 8F BA 05 00 STA $0005BA[$00:05BA]   
+$80/EC93 8F BC 05 00 STA $0005BC[$00:05BC]   
+$80/EC97 6B          RTL                     
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $80EC98 [UNKNOWN_34]:
+#################################
+$80/EC98 85 54       STA $54    [$00:0054]   
+$80/EC9A A5 2D       LDA $2D    [$00:002D]   
+$80/EC9C 8F 3A D0 7F STA $7FD03A[$7F:D03A]   
+$80/ECA0 85 60       STA $60    [$00:0060]   
+$80/ECA2 E2 20       SEP #$20                
+$80/ECA4 A9 7F       LDA #$7F                
+$80/ECA6 85 62       STA $62    [$00:0062]   
+######## call [DECOMPRESS_DATA]
+# this takes a while
+$80/ECA8 22 9D 8E 80 JSL $808E9D[$80:8E9D]   
+######## call [UNKNOWN_35]
+$80/ECAC 20 F2 EC    JSR $ECF2  [$80:ECF2]   
+$80/ECAF C2 20       REP #$20                
+$80/ECB1 AF 3A D0 7F LDA $7FD03A[$7F:D03A]   
+$80/ECB5 18          CLC                     
+$80/ECB6 69 10 00    ADC #$0010              
+$80/ECB9 8F 3C D0 7F STA $7FD03C[$7F:D03C]   
+$80/ECBD A9 04 00    LDA #$0004              
+######## call [UNKNOWN_36]
+$80/ECC0 20 FE EC    JSR $ECFE  [$80:ECFE]   
+$80/ECC3 8F 3E D0 7F STA $7FD03E[$7F:D03E]   
+$80/ECC7 E2 20       SEP #$20                
+$80/ECC9 7B          TDC                     
+$80/ECCA A5 29       LDA $29    [$00:0029]   
+$80/ECCC F0 23       BEQ $23    [$ECF1]      
+
+$80/ECF1 6B          RTL                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $80ECFE [UNKNOWN_36]:
+#################################
+$80/ECFE 18          CLC                     
+$80/ECFF 6F 3A D0 7F ADC $7FD03A[$7F:D03A]   
+$80/ED03 AA          TAX                     
+$80/ED04 BF 00 00 7F LDA $7F0000,x[$7F:7E12] 
+$80/ED08 18          CLC                     
+$80/ED09 6F 3A D0 7F ADC $7FD03A[$7F:D03A]   
+$80/ED0D 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $80ECF2 [UNKNOWN_35]:
+#################################
+$80/ECF2 C2 20       REP #$20                
+$80/ECF4 A5 2D       LDA $2D    [$00:002D]   
+$80/ECF6 18          CLC                     
+$80/ECF7 65 58       ADC $58    [$00:0058]   
+$80/ECF9 85 2D       STA $2D    [$00:002D]   
+$80/ECFB E2 20       SEP #$20                
+$80/ECFD 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $80EBAA [UNKNOWN_33]:
+#################################
+$80/EBAA A9 7F       LDA #$7F                
+$80/EBAC 48          PHA                     
+$80/EBAD AB          PLB                     
+$80/EBAE A0 00 00    LDY #$0000              
+$80/EBB1 B1 5D       LDA ($5D),y[$7F:0000]   
+$80/EBB3 85 58       STA $58    [$00:0058]   
+$80/EBB5 64 59       STZ $59    [$00:0059]   
+$80/EBB7 C2 30       REP #$30                
+$80/EBB9 AE 38 D0    LDX $D038  [$7F:D038]   
+$80/EBBC A5 58       LDA $58    [$00:0058]   
+$80/EBBE 0A          ASL A                   
+$80/EBBF 6D 38 D0    ADC $D038  [$7F:D038]   
+$80/EBC2 8D 38 D0    STA $D038  [$7F:D038]   
+$80/EBC5 A5 5D       LDA $5D    [$00:005D]   
+$80/EBC7 18          CLC                     
+$80/EBC8 69 06 00    ADC #$0006              
+$80/EBCB 85 5D       STA $5D    [$00:005D]   
+    $80/EBCD A5 5D       LDA $5D    [$00:005D]   
+    $80/EBCF 9D 00 D0    STA $D000,x[$7F:D000]   
+    $80/EBD2 A0 00 00    LDY #$0000              
+    $80/EBD5 B1 5D       LDA ($5D),y[$7F:0006]   
+    $80/EBD7 9D 20 D0    STA $D020,x[$7F:D020]   
+    $80/EBDA E2 20       SEP #$20                
+    $80/EBDC A0 02 00    LDY #$0002              
+    $80/EBDF B1 5D       LDA ($5D),y[$7F:0008]   
+    $80/EBE1 9D 10 D0    STA $D010,x[$7F:D010]   
+    $80/EBE4 8F 02 42 00 STA $004202[$00:4202]   
+    $80/EBE8 C8          INY                     
+    $80/EBE9 B1 5D       LDA ($5D),y[$7F:0009]   
+    $80/EBEB 9D 18 D0    STA $D018,x[$7F:D018]   
+    $80/EBEE 8F 03 42 00 STA $004203[$00:4203]   
+    $80/EBF2 7B          TDC                     
+    $80/EBF3 9D 11 D0    STA $D011,x[$7F:D011]   
+    $80/EBF6 9D 19 D0    STA $D019,x[$7F:D019]   
+    $80/EBF9 C2 20       REP #$20                
+    $80/EBFB A5 5D       LDA $5D    [$00:005D]   
+    $80/EBFD 18          CLC                     
+    $80/EBFE 69 04 00    ADC #$0004              
+    $80/EC01 9D 08 D0    STA $D008,x[$7F:D008]   
+    $80/EC04 18          CLC                     
+    $80/EC05 6F 16 42 00 ADC $004216[$00:4216]   
+    $80/EC09 6F 16 42 00 ADC $004216[$00:4216]   
+    $80/EC0D 85 5D       STA $5D    [$00:005D]   
+    $80/EC0F E8          INX                     
+    $80/EC10 E8          INX                     
+    $80/EC11 C6 58       DEC $58    [$00:0058]   
+    $80/EC13 D0 B8       BNE $B8    [$EBCD]      
+$80/EC15 E2 20       SEP #$20                
+$80/EC17 6B          RTL                     
+
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $839D46 [UNKNOWN_32]:
+#################################
+$83/9D46 29 FF 03    AND #$03FF              
+$83/9D49 85 54       STA $54    [$00:0054]   
+$83/9D4B B9 0E 3F    LDA $3F0E,y[$7F:6A02]   
+$83/9D4E 29 00 FC    AND #$FC00              
+$83/9D51 05 54       ORA $54    [$00:0054]   
+$83/9D53 99 0E 3F    STA $3F0E,y[$7F:6A02]   
+$83/9D56 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $8399C8 [UNKNOWN_31]:
+#################################
+$83/99C8 85 91       STA $91    [$00:0091]   
+$83/99CA EB          XBA                     
+$83/99CB 85 8F       STA $8F    [$00:008F]   
+######## call [UNKNOWN_30]
+$83/99CD 20 F3 9C    JSR $9CF3  [$83:9CF3]   
+$83/99D0 C2 20       REP #$20                
+$83/99D2 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $839CF3 [UNKNOWN_30]:
+#################################
+$83/9CF3 7B          TDC                     
+$83/9CF4 A5 91       LDA $91    [$00:0091]   
+$83/9CF6 C2 20       REP #$20                
+$83/9CF8 0A          ASL A                   
+$83/9CF9 0A          ASL A                   
+$83/9CFA 0A          ASL A                   
+$83/9CFB 0A          ASL A                   
+$83/9CFC 0A          ASL A                   
+$83/9CFD 0A          ASL A                   
+$83/9CFE 85 54       STA $54    [$00:0054]   
+$83/9D00 0A          ASL A                   
+$83/9D01 65 54       ADC $54    [$00:0054]   
+$83/9D03 85 54       STA $54    [$00:0054]   
+$83/9D05 A5 8F       LDA $8F    [$00:008F]   
+$83/9D07 29 FF 00    AND #$00FF              
+$83/9D0A 0A          ASL A                   
+$83/9D0B 65 54       ADC $54    [$00:0054]   
+$83/9D0D A8          TAY                     
+$83/9D0E E2 20       SEP #$20                
+$83/9D10 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $839CD6 [UNKNOWN_29]:
+#################################
+$83/9CD6 7B          TDC                     
+$83/9CD7 A5 91       LDA $91    [$00:0091]   
+$83/9CD9 C2 20       REP #$20                
+$83/9CDB 0A          ASL A                   
+$83/9CDC 0A          ASL A                   
+$83/9CDD 0A          ASL A                   
+$83/9CDE 0A          ASL A                   
+$83/9CDF 0A          ASL A                   
+$83/9CE0 85 54       STA $54    [$00:0054]   
+$83/9CE2 0A          ASL A                   
+$83/9CE3 65 54       ADC $54    [$00:0054]   
+$83/9CE5 85 54       STA $54    [$00:0054]   
+$83/9CE7 A5 8F       LDA $8F    [$00:008F]   
+$83/9CE9 29 FF 00    AND #$00FF              
+$83/9CEC 0A          ASL A                   
+$83/9CED 65 54       ADC $54    [$00:0054]   
+$83/9CEF AA          TAX                     
+$83/9CF0 E2 20       SEP #$20                
+$83/9CF2 60          RTS                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $80BFAA [UNKNOWN_28]:
+#################################
+$80/BFAA 8B          PHB                     
+$80/BFAB 85 54       STA $54    [$00:0054]   
+$80/BFAD EB          XBA                     
+$80/BFAE 85 5A       STA $5A    [$00:005A]   
+$80/BFB0 A9 7E       LDA #$7E                
+$80/BFB2 48          PHA                     
+$80/BFB3 AB          PLB                     
+$80/BFB4 C2 20       REP #$20                
+$80/BFB6 BD 00 F0    LDA $F000,x[$7E:F00A]   
+$80/BFB9 AA          TAX                     
+$80/BFBA E2 20       SEP #$20                
+$80/BFBC BD 00 F0    LDA $F000,x[$7E:F07E]   
+$80/BFBF C5 54       CMP $54    [$00:0054]   
+$80/BFC1 F0 10       BEQ $10    [$BFD3]      
+
+$80/BFD3 AB          PLB                     
+$80/BFD4 18          CLC                     
+$80/BFD5 6B          RTL                     
+
+
+
+
+
+
+
+
+
+
+
+#######################################
+########### $839D88 [WRITE_TILE_BLOCK]:
+#######################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# y = index into tile data to write block to
+# $22 = room id to use
+#
+# outputs:
+# accumulator size = 8bit
+# index size       = preserved
+# tile blocks at 7F000A and 7F3FCE filled with tile data from given room
+#
+# notes: 
+# looks like it's taking x/y for room and getting an index into resulting tile data
+######################################
+$83/9D88 84 60       STY $60    [$00:0060]   
+$83/9D8A 7B          TDC                     
+$83/9D8B A5 22       LDA $22    [$00:0022]   
+$83/9D8D C2 20       REP #$20                
+$83/9D8F 0A          ASL A                   
+$83/9D90 0A          ASL A                   
+$83/9D91 AA          TAX                     
+# read block - first two bytes = index into the 7E4000 block to read from, next two=width and height
+$83/9D92 BF 9B D6 93 LDA $93D69B,x[$93:D767] 
+$83/9D96 85 5D       STA $5D    [$00:005D]   
+$83/9D98 E2 20       SEP #$20                
+$83/9D9A BF 9D D6 93 LDA $93D69D,x[$93:D769] 
+$83/9D9E 85 5A       STA $5A    [$00:005A]   
+$83/9DA0 64 5B       STZ $5B    [$00:005B]   
+$83/9DA2 BF 9E D6 93 LDA $93D69E,x[$93:D76A] 
+$83/9DA6 85 56       STA $56    [$00:0056]   
+$83/9DA8 64 57       STZ $57    [$00:0057]   
+$83/9DAA C2 20       REP #$20                
+$83/9DAC A6 5D       LDX $5D    [$00:005D]   
+    # outer loop point
+    $83/9DAE A5 5A       LDA $5A    [$00:005A]   
+    $83/9DB0 85 58       STA $58    [$00:0058]   
+        # inner loop point
+        # layer 1
+        $83/9DB2 BF 0A 40 7E LDA $7E400A,x[$7E:400A] 
+        $83/9DB6 F0 03       BEQ $03    [$9DBB]      
+        $83/9DB8 99 0A 00    STA $000A,y[$7F:000A]   
+        # layer 2
+        $83/9DBB BF CE 4F 7E LDA $7E4FCE,x[$7E:4FCE] 
+        $83/9DBF F0 03       BEQ $03    [$9DC4]      
+        $83/9DC1 99 0E 3F    STA $3F0E,y[$7F:3F0E]   
+        $83/9DC4 E8          INX                     
+        $83/9DC5 E8          INX                     
+        $83/9DC6 C8          INY                     
+        $83/9DC7 C8          INY                     
+        $83/9DC8 C6 58       DEC $58    [$00:0058]   
+        # inner loop
+        $83/9DCA D0 E6       BNE $E6    [$9DB2]      
+    $83/9DCC A5 5D       LDA $5D    [$00:005D]   
+    $83/9DCE 18          CLC                     
+    $83/9DCF 69 60 00    ADC #$0060              
+    $83/9DD2 85 5D       STA $5D    [$00:005D]   
+    $83/9DD4 AA          TAX                     
+    $83/9DD5 A5 60       LDA $60    [$00:0060]   
+    $83/9DD7 69 C0 00    ADC #$00C0              
+    $83/9DDA 85 60       STA $60    [$00:0060]   
+    $83/9DDC A8          TAY                     
+    $83/9DDD C6 56       DEC $56    [$00:0056]   
+    # outer loop
+    $83/9DDF D0 CD       BNE $CD    [$9DAE]      
+$83/9DE1 E2 20       SEP #$20                
+$83/9DE3 60          RTS                     
+
+
+
+
+
+
+
+
+
+###################################################
+########### $839D68 [GET_TILE_INDEX_FROM_ROOM_X_Y]:
+###################################################
+# inputs:
+# accumulator size = don't care                       
+# index size       = don't care
+# $91 = y position in room array [8bit]
+# $8F = x position in room array [8bit].
+#
+# outputs:
+# accumulator size = 8bit
+# index size       = preserved
+# $54 = $91 * 192 + $8f * 2
+# a = y = $54
+#
+# notes: 
+# looks like it's taking x/y for room and getting an index into resulting tile data
+######################################
+# set 16 bit accumulator
+$83/9D68 C2 20       REP #$20                
+$83/9D6A A5 91       LDA $91    [$00:0091]   
+$83/9D6C 29 FF 00    AND #$00FF              
+$83/9D6F 0A          ASL A                   
+$83/9D70 0A          ASL A                   
+$83/9D71 0A          ASL A                   
+$83/9D72 0A          ASL A                   
+$83/9D73 0A          ASL A                   
+$83/9D74 0A          ASL A                   
+# $54[16bit] = $91[8bit] * 64
+$83/9D75 85 54       STA $54    [$00:0054]   
+$83/9D77 0A          ASL A                   
+$83/9D78 65 54       ADC $54    [$00:0054]   
+# multiply again by three for * 192 total
+$83/9D7A 85 54       STA $54    [$00:0054]   
+$83/9D7C A5 8F       LDA $8F    [$00:008F]   
+$83/9D7E 29 FF 00    AND #$00FF              
+$83/9D81 0A          ASL A               
+# also add $8f[8bit] * 2    
+$83/9D82 65 54       ADC $54    [$00:0054]   
+# and this goes in y.
+$83/9D84 A8          TAY                     
+$83/9D85 E2 20       SEP #$20                
+$83/9D87 60          RTS                     
+
+
+
+
+
+
+
+
+
+######################################
+########### $808E9D [DECOMPRESS_DATA]:
+######################################
+# inputs:
+# accumulator size = don't care                       
+# index size       = don't care
+# $60 = destination address [24 bit]
+#       this is 7E4000 in one of the examples above
+# $54 = source block number [16 bit index into 24-bit addresses at A78000]
+#       at the source location, the first two bytes are the decompressed block size,
+#       the next byte is some compression control code (seekback distance maybe?)
+#       and data follows; 00-7F are normal data, MSB set is compression code.
+#       for compression bytes [80+], the next byte is read; the first 12 bytes of
+#       both together are used as a seekback distance, the last 4 bits are a loop
+#       counter (it iterates that number +1 times).
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+#       decompressed data written to given destination address.  length of decompressed
+#       data is found in the first two bytes of the compressed block.
+#
+# notes: 
+#       used above to decompress the room data, and something else i haven't looked at
+######################################
+$80/8E9D 08          PHP                     
+$80/8E9E C2 30       REP #$30                
+$80/8EA0 8B          PHB                     
+$80/8EA1 A5 54       LDA $54    [$00:0054]   
+$80/8EA3 0A          ASL A                   
+$80/8EA4 65 54       ADC $54    [$00:0054]   
+$80/8EA6 AA          TAX                     
+$80/8EA7 64 5D       STZ $5D    [$00:005D]   
+$80/8EA9 BF 00 80 A7 LDA $A78000,x[$A7:843B] 
+$80/8EAD 09 00 80    ORA #$8000              
+$80/8EB0 A8          TAY                     
+$80/8EB1 BF 01 80 A7 LDA $A78001,x[$A7:843C] 
+$80/8EB5 0A          ASL A                   
+$80/8EB6 E2 20       SEP #$20                
+$80/8EB8 EB          XBA                     
+$80/8EB9 69 A7       ADC #$A7                
+$80/8EBB 85 5F       STA $5F    [$00:005F]   
+$80/8EBD B7 5D       LDA [$5D],y[$C2:C78A]   
+$80/8EBF 85 58       STA $58    [$00:0058]   
+$80/8EC1 C8          INY                     
+$80/8EC2 D0 05       BNE $05    [$8EC9]      
+$80/8EC9 B7 5D       LDA [$5D],y[$C2:C78B]   
+$80/8ECB 85 59       STA $59    [$00:0059]   
+$80/8ECD C8          INY                     
+$80/8ECE D0 05       BNE $05    [$8ED5]      
+$80/8ED5 C2 20       REP #$20                
+$80/8ED7 A5 60       LDA $60    [$00:0060]   
+$80/8ED9 AA          TAX                     
+$80/8EDA 18          CLC                     
+$80/8EDB 65 58       ADC $58    [$00:0058]   
+$80/8EDD 85 63       STA $63    [$00:0063]   
+$80/8EDF E2 20       SEP #$20                
+$80/8EE1 64 57       STZ $57    [$00:0057]   
+$80/8EE3 A5 62       LDA $62    [$00:0062]   
+$80/8EE5 09 7E       ORA #$7E                
+$80/8EE7 48          PHA                     
+$80/8EE8 AB          PLB                     
+$80/8EE9 4A          LSR A                   
+$80/8EEA 90 03       BCC $03    [$8EEF]      
+
+    $80/8EEF B7 5D       LDA [$5D],y[$C2:C78C]   
+    $80/8EF1 C8          INY                     
+    $80/8EF2 F0 30       BEQ $30    [$8F24]      
+    $80/8EF4 85 65       STA $65    [$00:0065]   
+    $80/8EF6 A9 08       LDA #$08                
+    $80/8EF8 85 66       STA $66    [$00:0066]   
+        $80/8EFA B7 5D       LDA [$5D],y[$C2:C78D]   
+        $80/8EFC 30 42       BMI $42    [$8F40]      
+        $80/8EFE 9D 00 00    STA $0000,x[$7E:4000]   
+        $80/8F01 E8          INX                     
+        $80/8F02 E4 63       CPX $63    [$00:0063]   
+        $80/8F04 F0 1B       BEQ $1B    [$8F21]      
+        $80/8F06 C8          INY                     
+        $80/8F07 D0 F1       BNE $F1    [$8EFA]      
+
+        $80/8F14 E4 63       CPX $63    [$00:0063]   
+        $80/8F16 F0 09       BEQ $09    [$8F21]      
+        $80/8F18 C8          INY                     
+        $80/8F19 F0 10       BEQ $10    [$8F2B]      
+        $80/8F1B C6 66       DEC $66    [$00:0066]   
+        $80/8F1D D0 DB       BNE $DB    [$8EFA]      
+    $80/8F1F 80 CE       BRA $CE    [$8EEF]      
+$80/8F21 AB          PLB                     
+$80/8F22 28          PLP                     
+$80/8F23 6B          RTL                     
+
+$80/8F40 06 65       ASL $65    [$00:0065]   
+$80/8F42 90 CC       BCC $CC    [$8F10]      
+$80/8F44 C8          INY                     
+$80/8F45 F0 EB       BEQ $EB    [$8F32]      
+$80/8F47 EB          XBA                     
+$80/8F48 B7 5D       LDA [$5D],y[$C2:C790]   
+$80/8F4A 29 0F       AND #$0F                
+$80/8F4C F0 21       BEQ $21    [$8F6F]      
+$80/8F4E 1A          INC A                   
+$80/8F4F 85 56       STA $56    [$00:0056]   
+$80/8F51 B7 5D       LDA [$5D],y[$C2:C790]   
+$80/8F53 C2 20       REP #$20                
+$80/8F55 4A          LSR A                   
+$80/8F56 4A          LSR A                   
+$80/8F57 4A          LSR A                   
+$80/8F58 4A          LSR A                   
+$80/8F59 09 00 F0    ORA #$F000              
+$80/8F5C 86 5A       STX $5A    [$00:005A]   
+$80/8F5E 5A          PHY                     
+$80/8F5F 9B          TXY                     
+$80/8F60 18          CLC                     
+$80/8F61 65 5A       ADC $5A    [$00:005A]   
+$80/8F63 AA          TAX                     
+$80/8F64 A5 56       LDA $56    [$00:0056]   
+$80/8F66 54 7E 7E    MVN 7E 7E               
+$80/8F69 BB          TYX                     
+$80/8F6A 7A          PLY                     
+$80/8F6B E2 20       SEP #$20                
+$80/8F6D 80 A5       BRA $A5    [$8F14]      
+
+
+
+
+
+
+
+
+
+
+
+#################################
+########### $839A1C [PLACE_CHEST]:
+#################################
+# i think this is placing chests? removing it makes no chests
+$83/9ABC 8D A8 E6    STA $E6A8  [$7F:E6A8]   
+$83/9ABF AD 34 E7    LDA $E734  [$7F:E734]   
+# break out if we're made 8 of these
+$83/9AC2 C9 08       CMP #$08                
+$83/9AC4 B0 51       BCS $51    [$9B17]      
+$83/9AC6 A9 07       LDA #$07                
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/9AC8 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/9ACB 18          CLC                     
+$83/9ACC 69 02       ADC #$02                
+$83/9ACE 85 8F       STA $8F    [$00:008F]   
+$83/9AD0 A9 06       LDA #$06                
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/9AD2 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/9AD5 18          CLC                     
+$83/9AD6 69 04       ADC #$04                
+$83/9AD8 85 91       STA $91    [$00:0091]   
+$83/9ADA AD A8 E6    LDA $E6A8  [$7F:E6A8]   
+# at this point, 
+# $91 = rand * 6 + 4
+# $8f = rand * 7 + 2
+# is this shifting the chest around randomly at the chosen spot?
+######## call [ROOM_INDEX_TO_MAP_X_Y]
+$83/9ADD 20 48 9B    JSR $9B48  [$83:9B48]   
+$83/9AE0 18          CLC                     
+$83/9AE1 65 91       ADC $91    [$00:0091]   
+$83/9AE3 85 91       STA $91    [$00:0091]   
+# now $91 = rand * 6 + 4 + yindex from 7FE6A8
+$83/9AE5 EB          XBA                     
+$83/9AE6 18          CLC                     
+$83/9AE7 65 8F       ADC $8F    [$00:008F]   
+$83/9AE9 85 8F       STA $8F    [$00:008F]   
+# now $8f = rand * 7 + 2 + xindex from 7FE6A8
+######## call [UNKNOWN_21]
+$83/9AEB 20 D3 99    JSR $99D3  [$83:99D3]   
+$83/9AEE B0 27       BCS $27    [$9B17]      
+$83/9AF0 A5 8F       LDA $8F    [$00:008F]   
+$83/9AF2 CD AB E6    CMP $E6AB  [$7F:E6AB]   
+$83/9AF5 D0 0A       BNE $0A    [$9B01]      
+
+######## call [UNKNOWN_24]
+$83/9B01 20 6B 9A    JSR $9A6B  [$83:9A6B]   
+$83/9B04 B0 11       BCS $11    [$9B17]      
+$83/9B06 AC 34 E7    LDY $E734  [$7F:E734]   
+$83/9B09 A5 8F       LDA $8F    [$00:008F]   
+$83/9B0B 99 36 E7    STA $E736,y[$7F:E736]   
+$83/9B0E A5 91       LDA $91    [$00:0091]   
+$83/9B10 99 3E E7    STA $E73E,y[$7F:E73E]   
+# number of chests?
+$83/9B13 EE 34 E7    INC $E734  [$7F:E734]   
+$83/9B16 18          CLC                     
+$83/9B17 60          RTS                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $839A6B [UNKNOWN_24]:
+#################################
+$83/9A6B A5 91       LDA $91    [$00:0091]   
+$83/9A6D 85 55       STA $55    [$00:0055]   
+$83/9A6F A5 8F       LDA $8F    [$00:008F]   
+$83/9A71 85 54       STA $54    [$00:0054]   
+######## call [UNKNOWN_25]
+$83/9A73 20 9F 9A    JSR $9A9F  [$83:9A9F]   
+$83/9A76 B0 26       BCS $26    [$9A9E]      
+$83/9A78 C6 54       DEC $54    [$00:0054]   
+######## call [UNKNOWN_25]
+$83/9A7A 20 9F 9A    JSR $9A9F  [$83:9A9F]   
+$83/9A7D B0 1F       BCS $1F    [$9A9E]      
+$83/9A7F E6 54       INC $54    [$00:0054]   
+$83/9A81 E6 54       INC $54    [$00:0054]   
+$83/9A83 E6 54       INC $54    [$00:0054]   
+######## call [UNKNOWN_25]
+$83/9A85 20 9F 9A    JSR $9A9F  [$83:9A9F]   
+$83/9A88 B0 14       BCS $14    [$9A9E]      
+$83/9A8A A5 8F       LDA $8F    [$00:008F]   
+$83/9A8C 85 54       STA $54    [$00:0054]   
+$83/9A8E C6 55       DEC $55    [$00:0055]   
+######## call [UNKNOWN_25]
+$83/9A90 20 9F 9A    JSR $9A9F  [$83:9A9F]   
+$83/9A93 B0 09       BCS $09    [$9A9E]      
+$83/9A95 E6 55       INC $55    [$00:0055]   
+$83/9A97 E6 55       INC $55    [$00:0055]   
+$83/9A99 E6 55       INC $55    [$00:0055]   
+######## call [UNKNOWN_25]
+$83/9A9B 20 9F 9A    JSR $9A9F  [$83:9A9F]   
+$83/9A9E 60          RTS                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $839A9F [UNKNOWN_25]:
+#################################
+$83/9A9F A2 00 00    LDX #$0000              
+$83/9AA2 EC 34 E7    CPX $E734  [$7F:E734]   
+$83/9AA5 B0 13       BCS $13    [$9ABA]      
+
+$83/9ABA 18          CLC                     
+$83/9ABB 60          RTS                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $839A1C [UNKNOWN_22]:
+#################################
+$83/9A1C DA          PHX                     
+$83/9A1D AE 31 E7    LDX $E731  [$7F:E731]   
+$83/9A20 E0 14 00    CPX #$0014              
+$83/9A23 B0 44       BCS $44    [$9A69]      
+$83/9A25 A5 8F       LDA $8F    [$00:008F]   
+$83/9A27 9D B1 E6    STA $E6B1,x[$7F:E6B1]   
+$83/9A2A A5 91       LDA $91    [$00:0091]   
+$83/9A2C 9D D1 E6    STA $E6D1,x[$7F:E6D1]   
+$83/9A2F 9B          TXY                     
+$83/9A30 AD 96 E6    LDA $E696  [$7F:E696]   
+$83/9A33 3A          DEC A                   
+$83/9A34 0A          ASL A                   
+$83/9A35 85 54       STA $54    [$00:0054]   
+$83/9A37 A9 06       LDA #$06                
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/9A39 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/9A3C 18          CLC                     
+$83/9A3D 65 54       ADC $54    [$00:0054]   
+$83/9A3F E2 30       SEP #$30                
+$83/9A41 AA          TAX                     
+$83/9A42 BF 5C D9 94 LDA $94D95C,x[$94:D95E] 
+$83/9A46 99 66 F9    STA $F966,y[$7F:F966]   
+$83/9A49 AA          TAX                     
+$83/9A4A BF F6 DD 94 LDA $94DDF6,x[$94:DDF7] 
+$83/9A4E C2 30       REP #$30                
+$83/9A50 29 FF 00    AND #$00FF              
+$83/9A53 0A          ASL A                   
+$83/9A54 AA          TAX                     
+$83/9A55 BF 00 F0 CF LDA $CFF000,x[$CF:F126] 
+$83/9A59 AA          TAX                     
+$83/9A5A E2 20       SEP #$20                
+$83/9A5C BF 00 00 CF LDA $CF0000,x[$CF:F4DF] 
+$83/9A60 29 03       AND #$03                
+$83/9A62 99 16 E2    STA $E216,y[$7F:E216]   
+$83/9A65 C8          INY                     
+$83/9A66 8C 31 E7    STY $E731  [$7F:E731]   
+$83/9A69 FA          PLX                     
+$83/9A6A 60          RTS                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $8399D3 [UNKNOWN_21]:
+#################################
+$83/99D3 DA          PHX                     
+$83/99D4 AD A9 E6    LDA $E6A9  [$7F:E6A9]   
+$83/99D7 3A          DEC A                   
+$83/99D8 3A          DEC A                   
+$83/99D9 C5 8F       CMP $8F    [$00:008F]   
+$83/99DB B0 19       BCS $19    [$99F6]      
+$83/99DD 18          CLC                     
+$83/99DE 69 04       ADC #$04                
+$83/99E0 C5 8F       CMP $8F    [$00:008F]   
+$83/99E2 90 12       BCC $12    [$99F6]      
+$83/99E4 AD AA E6    LDA $E6AA  [$7F:E6AA]   
+$83/99E7 3A          DEC A                   
+$83/99E8 C5 91       CMP $91    [$00:0091]   
+$83/99EA B0 0A       BCS $0A    [$99F6]      
+$83/99F6 A2 00 00    LDX #$0000              
+    $83/99F9 BD B1 E6    LDA $E6B1,x[$7F:E6B1]   
+    $83/99FC C5 8F       CMP $8F    [$00:008F]   
+    $83/99FE F0 0C       BEQ $0C    [$9A0C]      
+    $83/9A00 BD 16 E2    LDA $E216,x[$7F:E216]   
+    $83/9A03 89 01       BIT #$01                
+    $83/9A05 F0 0C       BEQ $0C    [$9A13]      
+    $83/9A07 1A          INC A                   
+    $83/9A08 C5 8F       CMP $8F    [$00:008F]   
+    $83/9A0A D0 07       BNE $07    [$9A13]      
+    $83/9A13 E8          INX                     
+    $83/9A14 EC 31 E7    CPX $E731  [$7F:E731]   
+    $83/9A17 90 E0       BCC $E0    [$99F9]      
+$83/9A19 18          CLC                     
+$83/9A1A FA          PLX                     
+$83/9A1B 60          RTS                     
+
+
+
+
+
+
+
+
+#################################
+########### $839B3C [UNKNOWN_20]:
+#################################
+# appears to be some kind of adjustment for x,y positions
+$83/9B3C 1A          INC A                   
+$83/9B3D 1A          INC A                   
+$83/9B3E 1A          INC A                   
+$83/9B3F EB          XBA                     
+$83/9B40 1A          INC A                   
+$83/9B41 1A          INC A                   
+$83/9B42 EB          XBA                     
+$83/9B43 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+############################################
+########### $839B48 [ROOM_INDEX_TO_MAP_X_Y]:
+############################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# a = index of room to convert
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# a = MSB is x, LSB is y
+# ex. incoming a = 0056
+#     result a   = 2418
+#     later on in main subroutine (for player pos, at least):
+#     18 + 3 = 1B; 24 + 2 = 26
+#     way later (not part of subrs shown here):
+#     26 * 16 - 80 = 1E0 = final x
+#     18 * 16 - 70 = 140 = final y
+# notes: 
+#     converts index into room data to an 8bit x,y packed into
+#     16bit accumulator
+######################################
+$83/9B48 85 54       STA $54    [$00:0054]   
+$83/9B4A 29 0F       AND #$0F                
+$83/9B4C 0A          ASL A                   
+$83/9B4D 85 55       STA $55    [$00:0055]   
+$83/9B4F 0A          ASL A                   
+$83/9B50 65 55       ADC $55    [$00:0055]   
+$83/9B52 EB          XBA                     
+$83/9B53 A5 54       LDA $54    [$00:0054]   
+$83/9B55 29 F0       AND #$F0                
+$83/9B57 38          SEC                     
+$83/9B58 E9 10       SBC #$10                
+$83/9B5A 4A          LSR A                   
+$83/9B5B 4A          LSR A                   
+$83/9B5C 85 55       STA $55    [$00:0055]   
+$83/9B5E 4A          LSR A                   
+$83/9B5F 65 55       ADC $55    [$00:0055]   
+$83/9B61 60          RTS                     
+
+
+
+
+
+
+
+
+##########################################
+########### $839B18 [CLEAR_ROOM_ID_FLAGS]:
+##########################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+#       7FEAxx data 0xC0 bits are cleared.  room ids are effectively limited to
+#       0->63.  Top 2 bits appear to be used for flags here and there, and this
+#       subroutine is called multiple times to re-clear the flags.
+#
+# notes: 
+#       clears 0x80 and 0x40 on all 7FEAxx values
+######################################
+$83/9B18 A2 FF 00    LDX #$00FF              
+    $83/9B1B BD 00 EA    LDA $EA00,x[$7F:EAFF]   
+    $83/9B1E 29 3F       AND #$3F                
+    $83/9B20 9D 00 EA    STA $EA00,x[$7F:EAFF]   
+    $83/9B23 CA          DEX                     
+    $83/9B24 10 F5       BPL $F5    [$9B1B]      
+$83/9B26 60          RTS                     
+
+
+
+
+
+
+
+
+
+#################################
+########### $839B62 [UNKNOWN_16]:
+#################################
+$83/9B62 AD A9 E6    LDA $E6A9  [$7F:E6A9]   
+$83/9B65 8D 00 00    STA $0000  [$7F:0000]   
+$83/9B68 A0 01 00    LDY #$0001              
+$83/9B6B 64 2D       STZ $2D    [$00:002D]   
+$83/9B6D 64 2E       STZ $2E    [$00:002E]   
+    # loop point
+    $83/9B6F 88          DEY                     
+    $83/9B70 10 01       BPL $01    [$9B73]      
+    # return if y goes negative
+    $83/9B72 60          RTS                     
+    $83/9B73 7B          TDC                     
+    $83/9B74 B9 00 00    LDA $0000,y[$7F:0000]   
+    $83/9B77 AA          TAX                     
+    $83/9B78 BD 00 EA    LDA $EA00,x[$7F:EAA1]   
+    $83/9B7B 30 F2       BMI $F2    [$9B6F]      
+    $83/9B7D 85 54       STA $54    [$00:0054]   
+    $83/9B7F BD F0 E9    LDA $E9F0,x[$7F:EA91]   
+    $83/9B82 F0 15       BEQ $15    [$9B99]      
+    $83/9B84 30 13       BMI $13    [$9B99]      
+    $83/9B86 C5 54       CMP $54    [$00:0054]   
+    $83/9B88 F0 07       BEQ $07    [$9B91]      
+    $83/9B8A 8A          TXA                     
+    $83/9B8B 38          SEC                     
+    $83/9B8C E9 10       SBC #$10                
+    ######## call [UNKNOWN_17]
+    $83/9B8E 20 39 9D    JSR $9D39  [$83:9D39]   
+    $83/9B91 8A          TXA                     
+    $83/9B92 38          SEC                     
+    $83/9B93 E9 10       SBC #$10                
+    $83/9B95 99 00 00    STA $0000,y[$7F:0000]   
+    $83/9B98 C8          INY                     
+    $83/9B99 BD 10 EA    LDA $EA10,x[$7F:EAB1]   
+    $83/9B9C F0 12       BEQ $12    [$9BB0]      
+    $83/9B9E 30 10       BMI $10    [$9BB0]      
+    $83/9BA0 C5 54       CMP $54    [$00:0054]   
+    $83/9BA2 F0 04       BEQ $04    [$9BA8]      
+    $83/9BA8 8A          TXA                     
+    $83/9BA9 18          CLC                     
+    $83/9BAA 69 10       ADC #$10                
+    $83/9BAC 99 00 00    STA $0000,y[$7F:0001]   
+    $83/9BAF C8          INY                     
+    $83/9BB0 BD 01 EA    LDA $EA01,x[$7F:EAA2]   
+    $83/9BB3 F0 0C       BEQ $0C    [$9BC1]      
+    $83/9BB5 30 0A       BMI $0A    [$9BC1]      
+    $83/9BB7 C5 54       CMP $54    [$00:0054]   
+    $83/9BB9 D0 06       BNE $06    [$9BC1]      
+    $83/9BBB 8A          TXA                     
+    $83/9BBC 1A          INC A                   
+    $83/9BBD 99 00 00    STA $0000,y[$7F:0002]   
+    $83/9BC0 C8          INY                     
+    $83/9BC1 BD FF E9    LDA $E9FF,x[$7F:EAA0]   
+    $83/9BC4 F0 0C       BEQ $0C    [$9BD2]      
+    $83/9BC6 30 0A       BMI $0A    [$9BD2]      
+    $83/9BC8 C5 54       CMP $54    [$00:0054]   
+    $83/9BCA D0 06       BNE $06    [$9BD2]      
+    $83/9BCC 8A          TXA                     
+    $83/9BCD 3A          DEC A                   
+    $83/9BCE 99 00 00    STA $0000,y[$7F:0005]   
+    $83/9BD1 C8          INY                     
+    $83/9BD2 BD 00 EA    LDA $EA00,x[$7F:EAA1]   
+    $83/9BD5 09 80       ORA #$80                
+    $83/9BD7 9D 00 EA    STA $EA00,x[$7F:EAA1]   
+    $83/9BDA 82 92 FF    BRL $FF92  [$9B6F]      
+
+
+
+
+
+
+#################################
+########### $839D39 [UNKNOWN_17]:
+#################################
+$83/9D39 84 2A       STY $2A    [$00:002A]   
+$83/9D3B A4 2D       LDY $2D    [$00:002D]   
+$83/9D3D 99 F1 E6    STA $E6F1,y[$7F:E6F1]   
+$83/9D40 C8          INY                     
+$83/9D41 84 2D       STY $2D    [$00:002D]   
+$83/9D43 A4 2A       LDY $2A    [$00:002A]   
+$83/9D45 60          RTS                     
+
+
+
+
+
+
+
+
+
+
+
+################################################
+########### $839D11 [FIND_RANDOM_UNMARKED_ROOM]:
+################################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# 7FE6AF = multiplier for how far to search for a spot
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# a = x = index of room
+#
+# notes: 
+#       see FIND_VALID_UNMARKED_ROOM.  This uses 7FE6AF multiplied
+#       by a random number as the size of the search for an open spot.
+######################################
+$83/9D11 AD AF E6    LDA $E6AF  [$7F:E6AF]   
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/9D14 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/9D17 1A          INC A                   
+$83/9D18 85 54       STA $54    [$00:0054]   
+######## call [FIND_VALID_UNMARKED_ROOM]
+$83/9D1A 20 23 9D    JSR $9D23  [$83:9D23]   
+$83/9D1D B0 03       BCS $03    [$9D22]      
+
+$83/9D22 60          RTS                     
+
+
+
+
+
+
+
+###############################################
+########### $839D23 [FIND_VALID_UNMARKED_ROOM]:
+###############################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# $54 = number of valid blocks to bypass before picking one.
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# a = x = index of room
+# carry status bit set if found result
+#
+# notes: 
+#       starting at the bottom, find a room id that is valid and not
+#       marked with the 0x80 bit.
+#       $54 is set to a random number before the call, so it doesn't just
+#       always pick the first/last spot.
+#       this is used to place the player spawn spot
+######################################
+$83/9D23 A2 F0 00    LDX #$00F0              
+    $83/9D26 BD 00 EA    LDA $EA00,x[$7F:EAF0]   
+    $83/9D29 F0 09       BEQ $09    [$9D34]      
+    $83/9D2B 30 07       BMI $07    [$9D34]      
+    $83/9D2D C6 54       DEC $54    [$00:0054]   
+    $83/9D2F D0 03       BNE $03    [$9D34]      
+    $83/9D31 8A          TXA                     
+    $83/9D32 38          SEC                     
+    $83/9D33 60          RTS                     
+    $83/9D34 CA          DEX                     
+    $83/9D35 10 EF       BPL $EF    [$9D26]      
+
+
+
+
+
+
+
+############################################
+########### $839B27 [RESET_SEARCH_DISTANCE]:
+############################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# 7FE6AF = a new search distance value.
+#
+# notes: 
+#     dump zero into 7F:E6AF, then loop through
+#     7FEA00-7FEAFF.  the number of non-zero elements
+#     in this range determines the new 7FE6AF value.
+######################################
+$83/9B27 A2 00 00    LDX #$0000              
+$83/9B2A 9C AF E6    STZ $E6AF  [$7F:E6AF]   
+    $83/9B2D BD 00 EA    LDA $EA00,x[$7F:EA00]   
+    $83/9B30 F0 03       BEQ $03    [$9B35]      
+    $83/9B32 EE AF E6    INC $E6AF  [$7F:E6AF]
+    $83/9B35 E8          INX                     
+    $83/9B36 E0 00 01    CPX #$0100              
+    $83/9B39 90 F2       BCC $F2    [$9B2D]      
+$83/9B3B 60          RTS                     
+
+
+
+
+
+
+#################################
+########### $839BDD [UNKNOWN_12]:
+#################################
+$83/9BDD A2 FF 00    LDX #$00FF              
+    $83/9BE0 BD 00 EA    LDA $EA00,x[$7F:EAFF]   
+    $83/9BE3 C5 2A       CMP $2A    [$00:002A]   
+    $83/9BE5 F0 07       BEQ $07    [$9BEE]      
+    $83/9BE7 CA          DEX                     
+    $83/9BE8 E0 10 00    CPX #$0010              
+    $83/9BEB B0 F3       BCS $F3    [$9BE0]      
+$83/9BED 60          RTS                     
+# more down here? some is in the big log file
+
+
+
+
+
+
+
+
+
+##################################
+########### $839CA0 [CREATE_ROOM]:
+##################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# $24 = [8bit] room width
+# $25 = [8bit] room width
+# $26 = [8bit] x position
+# $27 = [8bit] y position
+# $54 = [8bit] current room ID
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+#       7FEAxx data 0xC0 bits are cleared.  room ids are effectively limited to
+#       0->63.  Top 2 bits appear to be used for flags here and there, and this
+#       subroutine is called multiple times to re-clear the flags.
+#
+# notes: 
+#       generates a single room using given x/y/width/height
+######################################
+$83/9CA0 A5 26       LDA $26    [$00:0026]   
+$83/9CA2 85 8F       STA $8F    [$00:008F]   
+$83/9CA4 A5 27       LDA $27    [$00:0027]   
+$83/9CA6 85 91       STA $91    [$00:0091]   
+$83/9CA8 A5 25       LDA $25    [$00:0025]   
+# set height of room used for loop index
+# generated above by averaging two rng numbers and adding 1
+$83/9CAA 85 59       STA $59    [$00:0059]    
+    # loop point for y
+    ######## call [SET_ROOM_INDEX]
+    $83/9CAC 20 CB 9C    JSR $9CCB  [$83:9CCB]   
+    # set width of room used for loop index
+    $83/9CAF A5 24       LDA $24    [$00:0024]   
+    $83/9CB1 85 58       STA $58    [$00:0058]    
+        # loop point for x
+        $83/9CB3 BF 00 EA 7F LDA $7FEA00,x[$7F:EA51] 
+        $83/9CB7 D0 06       BNE $06    [$9CBF]      
+        $83/9CB9 A5 54       LDA $54    [$00:0054]   
+        $83/9CBB 9F 00 EA 7F STA $7FEA00,x[$7F:EA51] 
+        # move to next x value
+        $83/9CBF E8          INX                     
+        # decrease width by 1, keep looping on x if it's not zero yet
+        $83/9CC0 C6 58       DEC $58    [$00:0058]   
+        $83/9CC2 D0 EF       BNE $EF    [$9CB3]      
+    # move to next y value
+    $83/9CC4 E6 91       INC $91    [$00:0091]    
+    # decrease height by 1, keep looping on x if it's not zero yet
+    $83/9CC6 C6 59       DEC $59    [$00:0059]    # done?
+    $83/9CC8 D0 E2       BNE $E2    [$9CAC]      
+$83/9CCA 60          RTS                     
+
+
+
+
+
+
+#####################################
+########### $839CCB [SET_ROOM_INDEX]:
+#####################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# $8F = [8bit] x position
+# $91 = [8bit] y position
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# x = $91 (y pos) * 16 + $8F (x pos)
+#     to be used as index into 7FEAxx
+# notes: 
+#     sets x as an index into room data based on x and y position
+######################################
+$83/9CCB 7B          TDC                     
+$83/9CCC A5 91       LDA $91    [$00:0091]    # $91 = y val
+$83/9CCE 0A          ASL A                   
+$83/9CCF 0A          ASL A                   
+$83/9CD0 0A          ASL A                   
+$83/9CD1 0A          ASL A                   
+$83/9CD2 05 8F       ORA $8F    [$00:008F]    # $8f = x val
+$83/9CD4 AA          TAX                     
+$83/9CD5 60          RTS                     
+
+
+
+
+
+
+
+
+
+######################################################
+########### $839DE4 [MULTIPLY_TIMES_RANDOM_TWICE_AVG]:
+######################################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# a = number to multiply
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# a = ((incoming a) * (a random number) / 256 + 
+#     (incoming a) * (another random number) / 256) / 2
+# notes: 
+#     like MULTIPLY_TIMES_RANDOM, but do it twice then take the average
+#     presumably this gives you a less-noisy, more mean-concentrated value
+######################################
+$83/9DE4 8F 1C 21 00 STA $00211C[$00:211C]   
+######## call [GENERATE_RNG]
+$83/9DE8 22 C7 82 80 JSL $8082C7[$80:82C7]   
+$83/9DEC 8F 1B 21 00 STA $00211B[$00:211B]   
+$83/9DF0 7B          TDC                     
+$83/9DF1 8F 1B 21 00 STA $00211B[$00:211B]   
+$83/9DF5 AF 35 21 00 LDA $002135[$00:2135]   
+$83/9DF9 85 54       STA $54    [$00:0054]   
+######## call [GENERATE_RNG]
+$83/9DFB 22 C7 82 80 JSL $8082C7[$80:82C7]   
+$83/9DFF 8F 1B 21 00 STA $00211B[$00:211B]   
+$83/9E03 7B          TDC                     
+$83/9E04 8F 1B 21 00 STA $00211B[$00:211B]   
+$83/9E08 AF 35 21 00 LDA $002135[$00:2135]   
+$83/9E0C 18          CLC                     
+$83/9E0D 65 54       ADC $54    [$00:0054]   
+$83/9E0F 4A          LSR A                   
+$83/9E10 60          RTS                     
+
+
+
+
+
+
+
+############################################
+########### $839E11 [RANDOM_16BIT_OFFSET_X]:
+############################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# a = number to multiply
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# a = x = ((incoming a) * (a random number) / 256) * 2
+# notes: 
+#     calls MULTIPLY_TIMES_RANDOM, multiplies by 2, and
+#     dumps the result in x.  This appears to be used to
+#     access a random 16-bit offset from a table of given
+#     length.
+######################################
+######## call [MULTIPLY_TIMES_RANDOM]
+$83/9E11 20 1B 9E    JSR $9E1B  [$83:9E1B]   
+$83/9E14 EB          XBA                     
+$83/9E15 A9 00       LDA #$00                
+$83/9E17 EB          XBA                     
+$83/9E18 0A          ASL A                   
+$83/9E19 AA          TAX                     
+$83/9E1A 60          RTS                     
+
+
+
+
+############################################
+########### $839E1B [MULTIPLY_TIMES_RANDOM]:
+############################################
+# inputs:
+# accumulator size = 8bit
+# index size       = 16bit
+# a = number to multiply
+#
+# outputs:
+# accumulator size = preserved
+# index size       = preserved
+# a = (incoming a) * (a random number) / 256
+# notes: 
+#     multiplies by one of the pseudo random 7E05xx things,
+#     then takes the second byte of the result
+######################################
+$83/9E1B 8F 1C 21 00 STA $00211C[$00:211C]   
+######## call [GENERATE_RNG]
+$83/9E1F 22 C7 82 80 JSL $8082C7[$80:82C7]   
+$83/9E23 8F 1B 21 00 STA $00211B[$00:211B]   
+$83/9E27 7B          TDC                     
+$83/9E28 8F 1B 21 00 STA $00211B[$00:211B]   
+$83/9E2C AF 35 21 00 LDA $002135[$00:2135]   
+$83/9E30 60          RTS                     
+
+
+
+
+################################
+########### $83B5D3 [UNKNOWN_1]:
+################################
+
+# this is doing something with enemy loading
+$83/B5D3 08          PHP                     
+$83/B5D4 8B          PHB                     
+$83/B5D5 A9 7E       LDA #$7E                
+$83/B5D7 8D 7E 05    STA $057E  [$83:057E]   
+$83/B5DA C2 30       REP #$30                
+$83/B5DC AD B6 05    LDA $05B6  [$83:05B6]   
+$83/B5DF 89 01 00    BIT #$0001              
+$83/B5E2 F0 13       BEQ $13    [$B5F7]      
+$83/B5E4 E2 20       SEP #$20                
+$83/B5E6 AF A7 E6 7F LDA $7FE6A7[$7F:E6A7]   
+$83/B5EA 8D 7F 05    STA $057F  [$83:057F]   
+$83/B5ED 85 5F       STA $5F    [$00:005F]   
+$83/B5EF C2 20       REP #$20                
+$83/B5F1 AF A5 E6 7F LDA $7FE6A5[$7F:E6A5]   
+$83/B5F5 80 19       BRA $19    [$B610]      
+
+$83/B610 85 5D       STA $5D    [$00:005D]   
+$83/B612 AA          TAX                     
+$83/B613 A0 00 F0    LDY #$F000              
+$83/B616 A7 5D       LDA [$5D]  [$94:D54E]   
+# 94D54E -> 7EF000, xD2 (what is this data?)
+######## call [ROM_94_TO_RAM_7E]
+$83/B618 20 7D 05    JSR $057D  [$83:057D]   
+$83/B61B AD B6 05    LDA $05B6  [$7E:05B6]   
+$83/B61E 89 01 00    BIT #$0001              
+$83/B621 F0 04       BEQ $04    [$B627]      
+######## call [UNKNOWN_3]
+$83/B623 22 47 B8 8E JSL $8EB847[$8E:B847]   
+$83/B627 E2 20       SEP #$20                
+$83/B629 A9 7E       LDA #$7E                
+$83/B62B 48          PHA                     
+$83/B62C AB          PLB                     
+$83/B62D AD 17 F0    LDA $F017  [$7E:F017]   
+$83/B630 EB          XBA                     
+$83/B631 AD 16 F0    LDA $F016  [$7E:F016]   
+$83/B634 A8          TAY                     
+    $83/B635 7B          TDC                     
+    $83/B636 B9 00 F0    LDA $F000,y[$7E:F094]   
+    $83/B639 C9 FF       CMP #$FF                
+    $83/B63B F0 1C       BEQ $1C    [$B659]      
+    $83/B63D AA          TAX                     
+    $83/B63E B9 07 F0    LDA $F007,y[$7E:F09B]   
+    $83/B641 9F A6 D2 7F STA $7FD2A6,x[$7F:D2A6] 
+    $83/B645 B9 08 F0    LDA $F008,y[$7E:F09C]   
+    $83/B648 9F 86 D3 7F STA $7FD386,x[$7F:D386] 
+    $83/B64C E8          INX                     
+    $83/B64D C2 20       REP #$20                
+    $83/B64F 98          TYA                     
+    $83/B650 18          CLC                     
+    $83/B651 69 0A 00    ADC #$000A              
+    $83/B654 A8          TAY                     
+    $83/B655 E2 20       SEP #$20                
+    $83/B657 80 DC       BRA $DC    [$B635]      
+######## call [UNKNOWN_4]
+$83/B659 22 44 E8 80 JSL $80E844[$80:E844]   
+$83/B65D A2 00 00    LDX #$0000              
+$83/B660 A0 1E 00    LDY #$001E              
+######## call [UNKNOWN_5]
+$83/B663 22 22 E7 80 JSL $80E722[$80:E722]   
+######## call [UNKNOWN_6]
+$83/B667 22 AE CB 80 JSL $80CBAE[$80:CBAE]   
+$83/B66B AB          PLB                     
+$83/B66C 28          PLP                     
+$83/B66D 6B          RTL                     
+
+
+
+
+
+################################
+########### $80CBAE [UNKNOWN_6]:
+################################
+$80/CBAE 8B          PHB                     
+$80/CBAF 08          PHP                     
+$80/CBB0 C2 10       REP #$10                
+$80/CBB2 9C 73 12    STZ $1273  [$7E:1273]   
+$80/CBB5 A9 02       LDA #$02                
+$80/CBB7 1C B5 05    TRB $05B5  [$7E:05B5]   
+$80/CBBA A2 00 00    LDX #$0000              
+    $80/CBBD BF 8C D1 7F LDA $7FD18C,x[$7F:D18C] 
+    $80/CBC1 10 2D       BPL $2D    [$CBF0]      
+
+    $80/CBF0 E8          INX                     
+    $80/CBF1 E0 08 00    CPX #$0008              
+    $80/CBF4 90 C7       BCC $C7    [$CBBD]      
+$80/CBF6 A2 07 00    LDX #$0007              
+$80/CBF9 BF 8C D1 7F LDA $7FD18C,x[$7F:D193] 
+$80/CBFD 10 07       BPL $07    [$CC06]      
+
+$80/CC06 CA          DEX                     
+$80/CC07 10 F0       BPL $F0    [$CBF9]      
+$80/CC09 AD 73 12    LDA $1273  [$7E:1273]   
+$80/CC0C F0 15       BEQ $15    [$CC23]      
+
+$80/CC23 28          PLP                     
+$80/CC24 AB          PLB                     
+$80/CC25 6B          RTL                     
+
+
+
+
+
+
+
+################################
+########### $80E722 [UNKNOWN_5]:
+################################
+$80/E722 AF 96 D1 7F LDA $7FD196[$7F:D196]   
+$80/E726 C9 FF       CMP #$FF                
+$80/E728 D0 01       BNE $01    [$E72B]      
+$80/E72A 6B          RTL                     
+# more stuff down here
+
+
+
+
+
+
+################################
+########### $80E844 [UNKNOWN_4]:
+################################
+$80/E844 C2 20       REP #$20      
+# 0x1F iterations          
+$80/E846 A2 7C 00    LDX #$007C              
+$80/E849 7B          TDC                     
+# start loop
+    $80/E84A 9F 66 D4 7F STA $7FD466,x[$7F:D4E2] 
+    $80/E84E 9F 68 D4 7F STA $7FD468,x[$7F:D4E4] 
+    $80/E852 CA          DEX                     
+    $80/E853 CA          DEX                     
+    $80/E854 CA          DEX                     
+    $80/E855 CA          DEX                     
+    $80/E856 10 F2       BPL $F2    [$E84A]      
+# loop done
+$80/E858 AD AC 05    LDA $05AC  [$7E:05AC]   
+$80/E85B 0A          ASL A                   
+$80/E85C AA          TAX                     
+$80/E85D BF B5 B8 91 LDA $91B8B5,x[$91:BA95] 
+$80/E861 8F A0 D1 7F STA $7FD1A0[$7F:D1A0]   
+$80/E865 AD AC 05    LDA $05AC  [$7E:05AC]   
+$80/E868 0A          ASL A                   
+$80/E869 6D AC 05    ADC $05AC  [$7E:05AC]   
+$80/E86C AA          TAX                     
+$80/E86D BF 00 80 8F LDA $8F8000,x[$8F:82D0] 
+$80/E871 C9 FF FF    CMP #$FFFF              
+$80/E874 D0 0C       BNE $0C    [$E882]      
+$80/E876 8F 94 D1 7F STA $7FD194[$7F:D194]   
+$80/E87A E2 20       SEP #$20                
+$80/E87C 8F 96 D1 7F STA $7FD196[$7F:D196]   
+$80/E880 80 15       BRA $15    [$E897]      
+
+$80/E897 6B          RTL                     
+
+
+
+
+
+
+################################
+########### $8EB847 [UNKNOWN_3]:
+################################
+$8E/B847 E2 20       SEP #$20                
+$8E/B849 8B          PHB                     
+$8E/B84A A9 7E       LDA #$7E                
+$8E/B84C 48          PHA                     
+$8E/B84D AB          PLB                     
+$8E/B84E 7B          TDC                     
+$8E/B84F 8D 00 F2    STA $F200  [$7E:F200]   
+$8E/B852 AF AB E6 7F LDA $7FE6AB[$7F:E6AB]   
+$8E/B856 8D 01 F2    STA $F201  [$7E:F201]   
+$8E/B859 1A          INC A                   
+$8E/B85A 8D 03 F2    STA $F203  [$7E:F203]   
+$8E/B85D AF AC E6 7F LDA $7FE6AC[$7F:E6AC]   
+$8E/B861 8D 02 F2    STA $F202  [$7E:F202]   
+$8E/B864 1A          INC A                   
+$8E/B865 8D 04 F2    STA $F204  [$7E:F204]   
+$8E/B868 A9 F0       LDA #$F0                
+$8E/B86A 8D 05 F2    STA $F205  [$7E:F205]   
+$8E/B86D 7B          TDC                     
+$8E/B86E 8D 06 F2    STA $F206  [$7E:F206]   
+$8E/B871 8D 07 F2    STA $F207  [$7E:F207]   
+$8E/B874 A9 F0       LDA #$F0                
+$8E/B876 8D 08 F2    STA $F208  [$7E:F208]   
+$8E/B879 A9 FF       LDA #$FF                
+$8E/B87B 8D 09 F2    STA $F209  [$7E:F209]   
+$8E/B87E A0 00 00    LDY #$0000              
+$8E/B881 AF 31 E7 7F LDA $7FE731[$7F:E731]   
+$8E/B885 F0 39       BEQ $39    [$B8C0]      
+
+    $8E/B8C0 E8          INX                     
+    $8E/B8C1 E4 58       CPX $58    [$00:0058]   
+    $8E/B8C3 90 C9       BCC $C9    [$B88E]      
+$8E/B8C5 A9 FF       LDA #$FF                
+$8E/B8C7 99 00 F6    STA $F600,y[$7E:F600]   
+$8E/B8CA A0 00 00    LDY #$0000              
+$8E/B8CD A2 00 00    LDX #$0000              
+$8E/B8D0 BF F1 E6 7F LDA $7FE6F1,x[$7F:E6F1] 
+$8E/B8D4 F0 52       BEQ $52    [$B928]      
+$8E/B8D6 C9 FF       CMP #$FF                
+$8E/B8D8 F0 51       BEQ $51    [$B92B]      
+
+$8E/B92B A9 FF       LDA #$FF                
+$8E/B92D 99 00 F4    STA $F400,y[$7E:F400]   
+$8E/B930 A0 00 00    LDY #$0000              
+$8E/B933 A2 00 00    LDX #$0000              
+$8E/B936 8A          TXA                     
+$8E/B937 CF 34 E7 7F CMP $7FE734[$7F:E734]   
+$8E/B93B B0 33       BCS $33    [$B970]  
+    
+$8E/B970 A9 FF       LDA #$FF                
+$8E/B972 99 00 F8    STA $F800,y[$7E:F800]   
+$8E/B975 C2 20       REP #$20                
+$8E/B977 A9 00 02    LDA #$0200              
+$8E/B97A 8D 06 F0    STA $F006  [$7E:F006]   
+$8E/B97D A9 00 04    LDA #$0400              
+$8E/B980 8D 02 F0    STA $F002  [$7E:F002]   
+$8E/B983 A9 00 06    LDA #$0600              
+$8E/B986 8D 10 F0    STA $F010  [$7E:F010]   
+$8E/B989 A9 00 08    LDA #$0800              
+$8E/B98C 8D 26 F0    STA $F026  [$7E:F026]   
+$8E/B98F AB          PLB                     
+$8E/B990 E2 20       SEP #$20                
+$8E/B992 6B          RTL                     
+
+
+
+#######################################
+########### $83057D [ROM_94_TO_RAM_7E]:
+#######################################
+$83/057D 54 7E 94    MVN 94 7E               
+$83/0580 60          RTS                     
+
+
+
+
+###################################
+########### $8082C7 [GENERATE_RNG]:
+###################################	
+$80/82C7 8B          PHB                  
+$80/82C8 4B          PHK                  
+$80/82C9 AB          PLB                  
+$80/82CA DA          PHX                  
+$80/82CB 5A          PHY                  
+$80/82CC 08          PHP                  
+$80/82CD E2 30       SEP #$30             
+# 559 is the counter for which one we're using; increment it and loop around
+$80/82CF AE 59 05    LDX $0559  [$80:0559]     
+$80/82D2 E8          INX                     
+# 37 to cycle through the rng values
+$80/82D3 E0 37       CPX #$37                  
+$80/82D5 90 05       BCC $05    [$82DC]      
+######## call [RNG_RESET]
+$80/82D7 20 2D 83    JSR $832D  [$80:832D]   
+$80/82DA A2 00       LDX #$00                
+$80/82DC 8E 59 05    STX $0559  [$80:0559]   
+$80/82DF BD 21 05    LDA $0521,x[$80:054C]   
+$80/82E2 28          PLP                     
+$80/82E3 7A          PLY                     
+$80/82E4 FA          PLX                     
+$80/82E5 AB          PLB                     
+$80/82E6 6B          RTL                     
+
+
+
+###################################
+########### $80832D [RNG_RESET]:
+###################################	
+$80/832D A2 00       LDX #$00                
+    $80/832F BD 21 05    LDA $0521,x[$80:0521]   
+    $80/8332 5D 40 05    EOR $0540,x[$80:0540]   
+    $80/8335 9D 21 05    STA $0521,x[$80:0521]   
+    $80/8338 E8          INX                     
+    $80/8339 E0 18       CPX #$18                
+    $80/833B D0 F2       BNE $F2    [$832F]      
+# ^ v two separate loops
+    $80/833D BD 21 05    LDA $0521,x[$80:0539]   
+    $80/8340 5D 09 05    EOR $0509,x[$80:0521]   
+    $80/8343 9D 21 05    STA $0521,x[$80:0539]   
+    $80/8346 E8          INX                     
+    $80/8347 E0 37       CPX #$37                
+    $80/8349 D0 F2       BNE $F2    [$833D]      
+$80/834B 60          RTS                     
+
+
