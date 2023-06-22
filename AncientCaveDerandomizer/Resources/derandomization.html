@@ -1,9 +1,0 @@
-<html>
-<a href="main.html">Back</a>
-<h3>Derandomization</h3>
-The main purpose of this tool is to generate predictably-constructed Ancient Caves, allowing race runs to occur through identical caves.  This is done by tweaking some Lufia 2 code and injecting some pre-generated random values.
-<br>&nbsp;<br>
-The original Lufia 2 generates Ancient Cave data on-the-fly when you change floors using a frame counter found in RAM at 7E0040 and a pile of 0x38 values at 7E0520 which get modified when performing certain actions in-game.  These values determine the construction of the floor, which enemies are placed where, which items are in which chests... essentially everything about the floor.
-<br>&nbsp;<br>
-The de-randomizer injects a bit of code into the beginning of the floor load routine that replaces all of these values with pre-generated "random" values from the ROM that the tool adds.  This allows the floors to still appear random, but actually be the same every time you run through.
-</html>
